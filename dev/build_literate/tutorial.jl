@@ -31,7 +31,7 @@ println("typeof(cmaps) = $(typeof(cmaps))")
 println("size(cmaps) = $(size(cmaps))")
 
 # set up a 2D radial trajectory
-trj = traj_2d_radial_goldenratio(2Nx, Ncyc, Nt) # 2Nx for oversampling
+trj = traj_2d_radial_goldenratio(2Nx, Ncyc, Nt; adc_dim=false) # 2Nx for oversampling
 
 # set up basis functions
 U = randn(ComplexF32, Nt, Nc)
