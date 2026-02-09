@@ -50,7 +50,7 @@ theta = Float32.(0 * (1:Nt*Ncyc) .+ pi / 2)
 phi = reshape(phi, Ncyc, Nt)
 theta = reshape(theta, Ncyc, Nt)
 
-trj = traj_kooshball(2Nx, theta, phi)[1:2, :, :]
+trj = traj_kooshball(2Nx, theta, phi; adc_dim=false)[1:2, :, :]
 trj = reshape(trj, 2, 2Nx, Ncyc, Nt)
 trj = reshape(trj[:, 1:Nx, :, :], 2, Nx * Ncyc, Nt)
 

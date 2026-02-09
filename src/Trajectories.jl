@@ -33,7 +33,7 @@ function traj_cartesian(Nx, Ny, Nz, Nt; T=Int)
 end
 
 """
-    traj_kooshball_goldenratio(Nr, Ncyc, Nt; thetaRot, phiRot, delay)
+    traj_kooshball_goldenratio(Nr, Ncyc, Nt; theta_rot, phi_rot, delay, adc_dim)
 
 Function to calculate a 3D radial kooshball trajectory with a golden-means angular spacing of k-space readouts [1].
 
@@ -41,14 +41,15 @@ Function to calculate a 3D radial kooshball trajectory with a golden-means angul
 - `Nr::Int`: Number of read out samples
 - `Ncyc::Int`: Number of cycles
 - `Nt::Int`: Number of time steps in the trajectory
-- `thetaRot::Float` = 0: Fixed rotation angle along theta
-- `phiRot::Float` = 0: Fixed rotation angle along phi
+- `theta_rot::Float` = 0: Fixed rotation angle along theta
+- `phi_rot::Float` = 0: Fixed rotation angle along phi
 - `delay::Tuple{Float, Float, Float}`= `(0, 0, 0)`: Gradient delays in (HF, AP, LR)
+- `adc_dim::Bool` = `true`: Place ADC samples in a separate axis from each time frame for compatibility with wrapper functions.
 
 # References
 1. Chan RW, Ramsay EA, Cunningham CH, and Plewes DB. "Temporal stability of adaptive 3D radial MRI using multidimensional golden means". Magn. Reson. Med. 61 (2009) pp. 354-363. https://doi.org/10.1002/mrm.21837
 """
-function traj_kooshball_goldenratio(Nr, Ncyc, Nt; thetaRot=0, phiRot=0, delay=(0, 0, 0))
+function traj_kooshball_goldenratio(Nr, Ncyc, Nt; theta_rot=0, phi_rot=0, delay=(0, 0, 0), adc_dim=true)
     gm1, gm2 = calculate_golden_means()
     theta = acos.(mod.((0:(Ncyc*Nt-1)) * gm1, 1))
     phi = (0:(Ncyc*Nt-1)) * 2π * gm2
@@ -56,11 +57,11 @@ function traj_kooshball_goldenratio(Nr, Ncyc, Nt; thetaRot=0, phiRot=0, delay=(0
     theta = reshape(theta, Nt, Ncyc)
     phi = reshape(phi, Nt, Ncyc)
 
-    return traj_kooshball(Nr, theta', phi'; thetaRot=thetaRot, phiRot=phiRot, delay=delay)
+    return traj_kooshball(Nr, theta', phi'; theta_rot=theta_rot, phi_rot=phi_rot, delay=delay, adc_dim=adc_dim)
 end
 
 """
-    traj_2d_radial_goldenratio(Nr, Ncyc, Nt; thetaRot, phiRot, delay, N)
+    traj_2d_radial_goldenratio(Nr, Ncyc, Nt; theta_rot, phi_rot, delay, N, adc_dim)
 
 Function to calculate a 2D radial trajectory with golden-angle spacing between subsequent readouts [1].
 The use of tiny golden angles [2] is supported by modifying `N`.
@@ -69,16 +70,17 @@ The use of tiny golden angles [2] is supported by modifying `N`.
 - `Nr::Int`: Number of read out samples
 - `Ncyc::Int`: Number of cycles
 - `Nt::Int`: Number of time steps in the trajectory
-- `thetaRot::Float` = 0: Fixed rotation angle along theta
-- `phiRot::Float` = 0: Fixed rotation angle along phi
+- `theta_rot::Float` = 0: Fixed rotation angle along theta
+- `phi_rot::Float` = 0: Fixed rotation angle along phi
 - `delay::Tuple{Float, Float, Float}` = `(0, 0, 0)`: Gradient delays in (HF, AP, LR)
 - `N::Int` = 1: Number of tiny golden angle
+- `adc_dim::Bool` = `true`: Place ADC samples in a separate axis from each time frame for compatibility with wrapper functions.
 
 # References
 1. Winkelmann S, Schaeffter T, Koehler T, Eggers H, Doessel O. "An optimal radial profile order based on the Golden Ratio for time-resolved MRI". IEEE TMI 26:68-76 (2007)
 2. Wundrak S, Paul J, Ulrici J, Hell E, Geibel MA, Bernhardt P, Rottbauer W, Rasche V. "Golden ratio sparse MRI using tiny golden angles". Magn. Reson. Med. 75:2372-2378 (2016)
 """
-function traj_2d_radial_goldenratio(Nr, Ncyc, Nt; thetaRot=0, phiRot=0, delay=(0, 0, 0), N=1, T=Float32)
+function traj_2d_radial_goldenratio(Nr, Ncyc, Nt; theta_rot=0, phi_rot=0, delay=(0, 0, 0), N=1, T=Float32, adc_dim=true)
     τ = (sqrt(5) + 1) / 2
     angle_GR = T.(π / (τ + N - 1))
     phi = (0:(Ncyc*Nt-1)) .* angle_GR
@@ -87,13 +89,13 @@ function traj_2d_radial_goldenratio(Nr, Ncyc, Nt; thetaRot=0, phiRot=0, delay=(0
     theta = similar(phi)
     theta .= π / 2 # 2D
 
-    k = traj_kooshball(Nr, theta', phi'; thetaRot=thetaRot, phiRot=phiRot, delay=delay)
+    k = traj_kooshball(Nr, theta', phi'; theta_rot=theta_rot, phi_rot=phi_rot, delay=delay, adc_dim=adc_dim)
     k = k[1:2, :, :] # remove 3rd dimension
     return k
 end
 
 """
-    traj_kooshball(Nr, theta, phi; thetaRot, phiRot, delay)
+    traj_kooshball(Nr, theta, phi; theta_rot, phi_rot, delay, adc_dim)
 
 Function to calculate a 3D radial kooshball trajectory with custom sets of projection angles.
 
@@ -101,11 +103,12 @@ Function to calculate a 3D radial kooshball trajectory with custom sets of proje
 - `Nr::Int`: Number of read out samples
 - `theta::Array{Float,2}`: Array with dimensions: `Ncyc, Nt` defining the angles `theta` for each cycle and time step.
 - `phi::Array{Float,2}`: Array with dimensions: `Ncyc, Nt` defining the angles `phi` for each cycle and time step.
-- `thetaRot::Float` = 0: Fixed rotation angle along theta
-- `phiRot::Float` = 0: Fixed rotation angle along phi
+- `theta_rot::Float` = 0: Fixed rotation angle along theta
+- `phi_rot::Float` = 0: Fixed rotation angle along phi
 - `delay::Tuple{Float, Float, Float}` = `(0, 0, 0)`: Gradient delays in (HF, AP, LR)
+- `adc_dim::Bool` = `true`: Place ADC samples in a separate axis from each time frame for compatibility with wrapper functions.
 """
-function traj_kooshball(Nr, theta, phi; thetaRot=0, phiRot=0, delay=(0, 0, 0))
+function traj_kooshball(Nr, theta, phi; theta_rot=0, phi_rot=0, delay=(0, 0, 0), adc_dim=true)
     @assert (eltype(theta) == eltype(phi)) "Mismatch between input types of `theta` and `phi`"
 
     Ncyc, Nt = size(theta)
@@ -117,7 +120,7 @@ function traj_kooshball(Nr, theta, phi; thetaRot=0, phiRot=0, delay=(0, 0, 0))
     cphi = cos.(phi)
 
     k = Array{eltype(theta),3}(undef, 3, Nr * Ncyc, Nt)
-    if thetaRot == 0 && phiRot == 0
+    if theta_rot == 0 && phi_rot == 0
         for it ∈ axes(k, 3)
             ki = Array{eltype(theta),3}(undef, 3, Nr, Ncyc)
             Threads.@threads for ic ∈ 1:Ncyc
@@ -131,25 +134,26 @@ function traj_kooshball(Nr, theta, phi; thetaRot=0, phiRot=0, delay=(0, 0, 0))
             @. k[:, :, it] = max(min(k[:, :, it], 0.5), -0.5) # avoid NFFT.jl to throw errors. This should alter only very few points
         end
     else
-        sthetaRot = sin(thetaRot)
-        cthetaRot = cos(thetaRot)
-        sphiRot   = sin(phiRot)
-        cphiRot   = cos(phiRot)
+        stheta_rot = sin(theta_rot)
+        ctheta_rot = cos(theta_rot)
+        sphi_rot   = sin(phi_rot)
+        cphi_rot   = cos(phi_rot)
 
         k = Array{eltype(theta),3}(undef, 3, Nr * Ncyc, Nt)
         for it ∈ axes(k, 3)
             ki = Array{eltype(theta),3}(undef, 3, Nr, Ncyc)
             Threads.@threads for ic ∈ 1:Ncyc
                 for ir ∈ 1:Nr
-                    ki[1, ir, ic] = -(cphiRot * cphi[ic, it] * cthetaRot * stheta[ic, it] - sphiRot *  sphi[ic, it] * stheta[ic, it] + cphiRot * ctheta[ic, it] * sthetaRot)    * (kr[ir] + delay[1])
-                    ki[2, ir, ic] =  (cphiRot * sphi[ic, it]             * stheta[ic, it] + sphiRot * (cphi[ic, it] * cthetaRot * stheta[ic, it] + ctheta[ic, it] * sthetaRot)) * (kr[ir] + delay[2])
-                    ki[3, ir, ic] =  (cthetaRot * ctheta[ic, it] - sthetaRot * cphi[ic, it] * stheta[ic, it])                                                                   * (kr[ir] + delay[3])
+                    ki[1, ir, ic] = -(cphi_rot * cphi[ic, it] * ctheta_rot * stheta[ic, it] - sphi_rot *  sphi[ic, it] * stheta[ic, it] + cphi_rot * ctheta[ic, it] * stheta_rot)    * (kr[ir] + delay[1])
+                    ki[2, ir, ic] =  (cphi_rot * sphi[ic, it]             * stheta[ic, it] + sphi_rot * (cphi[ic, it] * ctheta_rot * stheta[ic, it] + ctheta[ic, it] * stheta_rot)) * (kr[ir] + delay[2])
+                    ki[3, ir, ic] =  (ctheta_rot * ctheta[ic, it] - stheta_rot * cphi[ic, it] * stheta[ic, it])                                                                   * (kr[ir] + delay[3])
                 end
             end
             k[:, :, it] = reshape(ki, 3, :)
             @. k[:, :, it] = max(min(k[:, :, it], 0.5), -0.5) # avoid NFFT.jl to throw errors. This should alter only very few points
         end
     end
+    k = adc_dim ? reshape(k, 3, Nr, Ncyc, Nt) : k
     return k
 end
 

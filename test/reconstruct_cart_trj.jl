@@ -50,7 +50,8 @@ for icoil = 1:Ncoil
 end
 
 data .= ifftshift(data, (1, 2))
-fft!(data, (1, 2))
+data = reshape(data, size(data,1), size(data,2), size(data,3)*size(data,4)) # reshape prevents MKL backend error
+fft!(data, [1, 2])
 data = fftshift(data, (1, 2))
 data = reshape(data, Nx*Nx, Nt, Ncoil)
 
