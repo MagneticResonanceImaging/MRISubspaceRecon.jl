@@ -19,7 +19,7 @@ Ncyc = 3
 img_shape = (Nx,Nx)
 
 ## Create trajectory
-trj = traj_2d_radial_goldenratio(Nr, Ncyc, Nt; N=1)
+trj = traj_2d_radial_goldenratio(Nr, Ncyc, Nt; adc_dim=false)
 
 ## Create phantom geometry
 x = shepp_logan(Nx)

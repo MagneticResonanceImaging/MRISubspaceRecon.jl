@@ -51,7 +51,7 @@ theta = Float32.(0 * (1:Nt*Ncyc) .+ pi / 2)
 phi = reshape(phi, Ncyc, Nt)
 theta = reshape(theta, Ncyc, Nt)
 
-trj = traj_kooshball(2Nx, theta, phi)
+trj = traj_kooshball(2Nx, theta, phi; adc_dim=false)
 trj = trj[1:2, :, :]
 
 ## set up basis functions
