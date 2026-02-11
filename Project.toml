@@ -1,6 +1,6 @@
 name = "MRISubspaceRecon"
 uuid = "81225dec-f002-11f0-8080-35af0c2c6e2d"
-version = "0.9.1-DEV"
+version = "0.9.1"
 authors = ["Jakob Asslaender <jakob.asslaender@nyumc.org>"]
 
 [deps]
