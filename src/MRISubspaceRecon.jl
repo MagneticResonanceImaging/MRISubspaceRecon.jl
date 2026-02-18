@@ -9,7 +9,7 @@ using LinearOperators
 using ExponentialUtilities
 using IterativeSolvers
 
-export NFFTNormalOp, calculate_coil_maps, calculate_backprojection, traj_kooshball, traj_traj_kooshball_goldenratio, traj_2d_radial_goldenratio, traj_cartesian
+export NFFTNormalOp, calculate_coil_maps, calculate_backprojection, traj_kooshball, traj_kooshball_goldenratio, traj_2d_radial_goldenratio, traj_cartesian
 export FFTNormalOp, radial_grog!
 
 function __init__()
