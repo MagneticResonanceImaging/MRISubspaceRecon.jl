@@ -37,25 +37,26 @@ function calculate_backprojection(data::AbstractArray{Tc,3}, trj::AbstractArray{
     Ncoil = size(data, 3)
     xbp = Array{Tc}(undef, img_shape..., Ncoef, Ncoil)
 
-    data_rs = data[sample_mask, :]
-    data_temp = Array{Tc}(undef, sum(sample_mask))
+    data_rs = Array{Tc}(undef, sum(sample_mask))
+    data_temp = similar(data_rs)
 
     img_idx = CartesianIndices(img_shape)
     verbose && println("calculating backprojection...")
     flush(stdout)
-    for icoef ∈ axes(U, 2)
-        t = @elapsed for icoil ∈ axes(data, 3)
+    t = @elapsed for icoil ∈ axes(data, 3)
+        data_rs .= @view data[sample_mask, icoil]
+        for icoef ∈ axes(U, 2)
             for it ∈ axes(data, 2)
                 idx1 = cumsum_nsamp[it]
                 idx2 = cumsum_nsamp[it + 1] - 1
-                @views data_temp[idx1:idx2] .= data_rs[idx1:idx2,icoil] .* conj(U[it,icoef])
+                @views data_temp[idx1:idx2] .= data_rs[idx1:idx2] .* conj(U[it,icoef])
             end
             apply_density_compensation!(data_temp, trj_rs; density_compensation)
             @views NonuniformFFTs.exec_type1!(xbp[img_idx, icoef, icoil], p, data_temp) # type 1: non-uniform points to uniform grid
         end
-        verbose && println("coefficient = $icoef: t = $t s")
-        flush(stdout)
     end
+    verbose && println("time to compute backprojection: t = $t s")
+    flush(stdout)
     return xbp
 end
 
@@ -78,26 +79,27 @@ function calculate_backprojection(data::AbstractArray{Tc,3}, trj::AbstractArray{
     xbp = zeros(Tc, img_shape..., Ncoef)
     xtmp = Array{Tc}(undef, img_shape)
 
-    data_rs = data[sample_mask, :]
-    data_temp = Array{Tc}(undef, sum(sample_mask))
+    data_rs = Array{Tc}(undef, sum(sample_mask))
+    data_temp = similar(data_rs)
 
     img_idx = CartesianIndices(img_shape)
     verbose && println("calculating backprojection...")
     flush(stdout)
-    for icoef ∈ axes(U, 2)
-        t = @elapsed for icoil ∈ eachindex(cmaps)
+    t = @elapsed for icoil ∈ eachindex(cmaps)
+        data_rs .= @view data[sample_mask, icoil]
+        for icoef ∈ axes(U, 2)
              @simd for it ∈ axes(data, 2)
                 idx1 = cumsum_nsamp[it]
                 idx2 = cumsum_nsamp[it + 1] - 1
-                @views data_temp[idx1:idx2] .= data_rs[idx1:idx2,icoil] .* conj(U[it,icoef])
+                @views data_temp[idx1:idx2] .= data_rs[idx1:idx2] .* conj(U[it,icoef])
             end
             apply_density_compensation!(data_temp, trj_rs; density_compensation)
             NonuniformFFTs.exec_type1!(xtmp, p, data_temp) # type 1: non-uniform points to uniform grid
             xbp[img_idx, icoef] .+= conj.(cmaps[icoil]) .* xtmp
         end
-        verbose && println("coefficient = $icoef: t = $t s")
-        flush(stdout)
     end
+    verbose && println("time to compute backprojection: t = $t s")
+    flush(stdout)
     return xbp
 end
 
