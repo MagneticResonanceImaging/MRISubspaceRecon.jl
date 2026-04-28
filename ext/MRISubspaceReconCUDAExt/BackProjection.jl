@@ -86,22 +86,31 @@ function multiply_data_with_basis!(data_temp, Uc, nsamp_t, cumsum_nsamp, icoef)
     ik = (blockIdx().x - 1) * blockDim().x + threadIdx().x
     it = (blockIdx().y - 1) * blockDim().y + threadIdx().y
 
-    # Multiply data by basis, accounting for varying number of samples per time frame
-    if it <= length(nsamp_t)
+    # Grid-stride loop over time frames to handle cases where the number of
+    # time frames exceeds the maximum number of blocks in the y-dimension
+    stride_y = gridDim().y * blockDim().y
+    while it <= length(nsamp_t)
         if ik <= nsamp_t[it]
             ik_abs = cumsum_nsamp[it] + ik # absolute sample index
             data_temp[ik_abs] *= Uc[it, icoef]
-            return
         end
+        it += stride_y
     end
+    return
 end
 
 # Default threading for back projection
 function default_launch_config(nsamp_t)
     max_threads = attribute(device(), CUDA.DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK)
+    max_blocks_y = attribute(device(), CUDA.DEVICE_ATTRIBUTE_MAX_GRID_DIM_Y)
+
     threads_x = min(max_threads, maximum(nsamp_t))
     threads_y = min(max_threads ÷ threads_x, length(nsamp_t))
     threads = (threads_x, threads_y)
-    blocks = ceil.(Int, (maximum(nsamp_t), length(nsamp_t)) ./ threads) # samples as inner index
+
+    blocks_x = ceil(Int, maximum(nsamp_t) / threads_x)
+    blocks_y = min(ceil(Int, length(nsamp_t) / threads_y), max_blocks_y)
+    blocks = (blocks_x, blocks_y)
+
     return threads, blocks
 end

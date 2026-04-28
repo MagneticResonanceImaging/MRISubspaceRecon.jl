@@ -111,10 +111,15 @@ function calculate_kernel_noncartesian(img_shape_os, trj::CuArray{T,3}, U::CuArr
 
     # Params for kernel_uprod!
     max_threads = attribute(device(), CUDA.DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK)
+    max_blocks_x = attribute(device(), CUDA.DEVICE_ATTRIBUTE_MAX_GRID_DIM_X)
+
     threads_y = min(max_threads, maximum(nsamp_t))
     threads_x = min(max_threads ÷ threads_y, length(nsamp_t))
     threads = (threads_x, threads_y)
-    blocks = ceil.(Int, (length(nsamp_t), maximum(nsamp_t)) ./ threads)
+
+    blocks_x = min(ceil(Int, length(nsamp_t) / threads_x), max_blocks_x)
+    blocks_y = ceil(Int, maximum(nsamp_t) / threads_y)
+    blocks = (blocks_x, blocks_y)
 
     # Params for kernel_sort!
     threads_sort = min(max_threads, length(kmask_indcs))
@@ -163,10 +168,15 @@ function calculate_kernel_noncartesian(img_shape_os, trj::CuArray{T,3}, U::CuArr
 
     # Params for kernel_uprod!
     max_threads = attribute(device(), CUDA.DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK)
+    max_blocks_x = attribute(device(), CUDA.DEVICE_ATTRIBUTE_MAX_GRID_DIM_X)
+
     threads_y = min(max_threads, maximum(nsamp_t))
     threads_x = min(max_threads ÷ threads_y, length(nsamp_t))
     threads = (threads_x, threads_y)
-    blocks = ceil.(Int, (length(nsamp_t), maximum(nsamp_t)) ./ threads)
+
+    blocks_x = min(ceil(Int, length(nsamp_t) / threads_x), max_blocks_x)
+    blocks_y = ceil(Int, maximum(nsamp_t) / threads_y)
+    blocks = (blocks_x, blocks_y)
 
     # Params for kernel_sort!
     threads_sort = min(max_threads, length(kmask_indcs))
@@ -221,14 +231,17 @@ function multiply_basis_vectors!(S, U, nsamp_t, cumsum_nsamp, ic1, ic2)
     it = (blockIdx().x - 1) * blockDim().x + threadIdx().x
     ik = (blockIdx().y - 1) * blockDim().y + threadIdx().y
 
-    # Multiply signal vector by basis, accounting for varying number of samples per time frame
-    if it <= length(nsamp_t)
+    # Grid-stride loop over time frames to handle cases where the number of
+    # time frames exceeds the maximum number of blocks in the x-dimension
+    stride_x = gridDim().x * blockDim().x
+    while it <= length(nsamp_t)
         Uprod = conj(U[it, ic1]) * U[it, ic2]
         if ik <= nsamp_t[it]
             S[cumsum_nsamp[it] + ik] = Uprod
-            return
         end
+        it += stride_x
     end
+    return
 end
 
 # Place elements of kernel in packed Λ
