@@ -78,11 +78,12 @@ struct _FFTNormalOp{S,ΛType,T,N,E,F,G}
     cmaps::G
 end
 
-function calculate_kernel_cartesian(img_shape, trj, U; sample_mask=trues(size(trj)[2:end]))
+function calculate_kernel_cartesian(img_shape, trj, U; sample_mask=trues(size(trj)[2:end]), verbose=false)
     Ncoeff = size(U, 2)
     Λ = zeros(eltype(U), Ncoeff, Ncoeff, img_shape...)
 
-    Threads.@threads for ic ∈ CartesianIndices((Ncoeff, Ncoeff))
+    verbose && println("calculating Cartesian kernel...")
+    t = @elapsed Threads.@threads for ic ∈ CartesianIndices((Ncoeff, Ncoeff))
         for it ∈ axes(U, 1), is ∈ axes(trj, 2)
             if sample_mask[is, it]
                 k_idx = ntuple(j -> mod1(Int(trj[j, is, it]) - img_shape[j] ÷ 2, img_shape[j]), length(img_shape)) # incorporates ifftshift
@@ -93,6 +94,7 @@ function calculate_kernel_cartesian(img_shape, trj, U; sample_mask=trues(size(tr
             end
         end
     end
+    verbose && println("time to compute kernel: t = $t s")
     return Λ
 end
 

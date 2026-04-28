@@ -145,26 +145,25 @@ function calculate_kernel_noncartesian(img_shape_os, trj::AbstractArray{T,3}, U:
     # Evaluating only the upper triangular matrix assumes that the PSF from the rightmost voxel to the leftmost voxel is the adjoint of the PSF in the opposite direction.
     # For the outmost voxel, this is not correct, but the resulting images are virtually identical in our test cases.
     # To avoid this error, remove the `if ic2 >= ic1` and the `Λ[ic2,ic1,it] = conj.(λ[kmask_indcs[it]])` statements at the cost of computation time.
-    for ic2 ∈ axes(Λ, 2), ic1 ∈ axes(Λ, 1)
+    verbose && println("calculating non-Cartesian kernel...")
+    t = @elapsed for ic2 ∈ axes(Λ, 2), ic1 ∈ axes(Λ, 1)
         if ic2 >= ic1 # eval. only upper triangular matrix
-            t = @elapsed begin
-                @simd for it ∈ axes(U,1)
-                    idx1 = cumsum_nsamp[it]
-                    idx2 = cumsum_nsamp[it + 1] - 1
-                    @inbounds S[idx1:idx2] .= conj(U[it,ic1]) * U[it,ic2]
-                end
-
-                NonuniformFFTs.exec_type1!(λ2, nfftplan, vec(S)) # type 1: non-uniform points to uniform grid
-                mul!(λ, fftplan, λ2)
-
-                Threads.@threads for it ∈ eachindex(kmask_indcs)
-                    @inbounds Λ[ic2,ic1,it] = conj.(λ[kmask_indcs[it]])
-                    @inbounds Λ[ic1,ic2,it] =       λ[kmask_indcs[it]]
-                end
+            @simd for it ∈ axes(U,1)
+                idx1 = cumsum_nsamp[it]
+                idx2 = cumsum_nsamp[it + 1] - 1
+                @inbounds S[idx1:idx2] .= conj(U[it,ic1]) * U[it,ic2]
             end
-            verbose && println("ic = ($ic1, $ic2): t = $t s"); flush(stdout)
+
+            NonuniformFFTs.exec_type1!(λ2, nfftplan, vec(S)) # type 1: non-uniform points to uniform grid
+            mul!(λ, fftplan, λ2)
+
+            Threads.@threads for it ∈ eachindex(kmask_indcs)
+                @inbounds Λ[ic2,ic1,it] = conj.(λ[kmask_indcs[it]])
+                @inbounds Λ[ic1,ic2,it] =       λ[kmask_indcs[it]]
+            end
         end
     end
+    verbose && println("time to compute kernel: t = $t s")
     return Λ, kmask_indcs
 end
 
@@ -200,27 +199,26 @@ function calculate_kernel_noncartesian(img_shape_os, trj::AbstractArray, U::Abst
 
     # Evaluating only the upper triangular matrix assumes that the PSF from the rightmost voxel to the leftmost voxel is the adjoint of the PSF in the opposite direction.
     # For the outmost voxel, this is not correct, but the resulting images are virtually identical in our test cases.
-    for ic2 ∈ axes(Λ, 2), ic1 ∈ axes(Λ, 1)
+    verbose && println("calculating non-Cartesian kernel...")
+    t = @elapsed for ic2 ∈ axes(Λ, 2), ic1 ∈ axes(Λ, 1)
         if ic2 >= ic1 # eval. only upper triangular matrix
-            t = @elapsed begin
-                @simd for it ∈ axes(U,1)
-                    idx1 = cumsum_nsamp[it]
-                    idx2 = cumsum_nsamp[it + 1] - 1
-                    @inbounds S[idx1:idx2] .= U[it,ic1] * U[it,ic2]
-                end
-
-                NonuniformFFTs.exec_type1!(λ2, nfftplan, vec(S))
-                λ2 .= conj.(λ2) # conjugate input to flip the sign of the exponential in brfft
-                mul!(λ, brfftplan, λ2)
-
-                Threads.@threads for it ∈ eachindex(kmask_indcs)
-                    @inbounds Λ[ic2,ic1,it] = λ[kmask_indcs[it]]
-                    @inbounds Λ[ic1,ic2,it] = λ[kmask_indcs[it]]
-                end
+            @simd for it ∈ axes(U,1)
+                idx1 = cumsum_nsamp[it]
+                idx2 = cumsum_nsamp[it + 1] - 1
+                @inbounds S[idx1:idx2] .= U[it,ic1] * U[it,ic2]
             end
-            verbose && println("ic = ($ic1, $ic2): t = $t s"); flush(stdout)
+
+            NonuniformFFTs.exec_type1!(λ2, nfftplan, vec(S))
+            λ2 .= conj.(λ2) # conjugate input to flip the sign of the exponential in brfft
+            mul!(λ, brfftplan, λ2)
+
+            Threads.@threads for it ∈ eachindex(kmask_indcs)
+                @inbounds Λ[ic2,ic1,it] = λ[kmask_indcs[it]]
+                @inbounds Λ[ic1,ic2,it] = λ[kmask_indcs[it]]
+            end
         end
     end
+    verbose && println("time to compute kernel: t = $t s")
     return Λ, kmask_indcs
 end
 
