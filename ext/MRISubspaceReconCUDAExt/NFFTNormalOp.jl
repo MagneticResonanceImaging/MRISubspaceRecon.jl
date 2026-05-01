@@ -109,26 +109,19 @@ function calculate_kernel_noncartesian(img_shape_os, trj::CuArray{T,3}, U::CuArr
     nfftplan = PlanNUFFT(Complex{T}, img_shape_os; backend=CUDABackend(), gpu_method=:shared_memory, gpu_batch_size = Val(200)) # use plan specific to real inputs
     set_points!(nfftplan, NonuniformFFTs._transform_point_convention.(trj[:, sample_mask]))
 
-    # Params for kernel_uprod!
-    max_threads = attribute(device(), CUDA.DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK)
-    threads_y = min(max_threads, maximum(nsamp_t))
-    threads_x = min(max_threads ÷ threads_y, length(nsamp_t))
-    threads = (threads_x, threads_y)
-    blocks = ceil.(Int, (length(nsamp_t), maximum(nsamp_t)) ./ threads)
+   # Configure threads and blocks for each kernel within the coefficient loop
+    threads_multiply, blocks_multiply, threads_store, blocks_store = launch_config_kernel(nsamp_t, kmask_indcs)
 
-    # Params for kernel_sort!
-    threads_sort = min(max_threads, length(kmask_indcs))
-    blocks_sort = ceil.(Int, length(kmask_indcs) ./ threads_sort)
 
     verbose && println("calculating non-Cartesian kernel...")
-    t = @elapsed for ic2 ∈ 1:Ncoeff, ic1 ∈ 1:Ncoeff
+    t = @elapsed CUDA.@sync for ic2 ∈ 1:Ncoeff, ic1 ∈ 1:Ncoeff
         if ic2 >= ic1 # eval. only upper triangular matrix
-            @cuda threads=threads blocks=blocks multiply_basis_vectors!(S, U, nsamp_t, cumsum_nsamp, ic1, ic2)
+            @cuda threads=threads_multiply blocks=blocks_multiply multiply_basis_vectors!(S, U, nsamp_t, cumsum_nsamp, ic1, ic2)
 
             exec_type1!(λ2, nfftplan, vec(S)) # type 1: non-uniform points to uniform grid
             mul!(λ, fftplan, λ2)
 
-            @cuda threads=threads_sort blocks=blocks_sort store_packed_kernel!(Λ, λ, kmask_indcs, ic1, ic2)
+            @cuda threads=threads_store blocks=blocks_store store_packed_kernel!(Λ, λ, kmask_indcs, ic1, ic2)
         end
     end
     verbose && println("time to compute kernel: t = $t s")
@@ -161,28 +154,20 @@ function calculate_kernel_noncartesian(img_shape_os, trj::CuArray{T,3}, U::CuArr
     nfftplan = PlanNUFFT(T, img_shape_os; backend=CUDABackend(), gpu_method=:shared_memory, gpu_batch_size = Val(200)) # use plan specific to real inputs
     set_points!(nfftplan, NonuniformFFTs._transform_point_convention.(trj[:, sample_mask]))
 
-    # Params for kernel_uprod!
-    max_threads = attribute(device(), CUDA.DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK)
-    threads_y = min(max_threads, maximum(nsamp_t))
-    threads_x = min(max_threads ÷ threads_y, length(nsamp_t))
-    threads = (threads_x, threads_y)
-    blocks = ceil.(Int, (length(nsamp_t), maximum(nsamp_t)) ./ threads)
-
-    # Params for kernel_sort!
-    threads_sort = min(max_threads, length(kmask_indcs))
-    blocks_sort = ceil.(Int, length(kmask_indcs) ./ threads_sort)
+    # Configure threads and blocks for each kernel within the coefficient loop
+    threads_multiply, blocks_multiply, threads_store, blocks_store = launch_config_kernel(nsamp_t, kmask_indcs)
 
     verbose && println("calculating non-Cartesian kernel...")
-    t = @elapsed for ic2 ∈ 1:Ncoeff, ic1 ∈ 1:Ncoeff
+    t = @elapsed CUDA.@sync for ic2 ∈ 1:Ncoeff, ic1 ∈ 1:Ncoeff
         if ic2 >= ic1 # eval. only upper triangular matrix
             t = @elapsed begin
-                @cuda threads=threads blocks=blocks multiply_basis_vectors!(S, U, nsamp_t, cumsum_nsamp, ic1, ic2)
+                @cuda threads=threads_multiply blocks=blocks_multiply multiply_basis_vectors!(S, U, nsamp_t, cumsum_nsamp, ic1, ic2)
 
                 exec_type1!(λ2, nfftplan, vec(S)) # type 1: non-uniform points to uniform grid
                 λ2 .= conj.(λ2) # conjugate to flip the sign of the exponential in brfft
                 mul!(λ, brfftplan, λ2)
 
-                @cuda threads=threads_sort blocks=blocks_sort store_packed_kernel!(Λ, λ, kmask_indcs, ic1, ic2)
+                @cuda threads=threads_store blocks=blocks_store store_packed_kernel!(Λ, λ, kmask_indcs, ic1, ic2)
             end
         end
     end
@@ -218,69 +203,94 @@ function LinearAlgebra.mul!(x::CuArray, S::MRISubspaceRecon._NFFTNormalOp, b, α
 end
 
 function multiply_basis_vectors!(S, U, nsamp_t, cumsum_nsamp, ic1, ic2)
-    it = (blockIdx().x - 1) * blockDim().x + threadIdx().x
-    ik = (blockIdx().y - 1) * blockDim().y + threadIdx().y
+    ik = (blockIdx().x-1) * blockDim().x + threadIdx().x
+    it = (blockIdx().y-1) * blockDim().y + threadIdx().y
 
-    # Multiply signal vector by basis, accounting for varying number of samples per time frame
-    if it <= length(nsamp_t)
+    # Grid-stride loop over time frames to handle cases where the number of
+    # time frames exceeds the maximum number of blocks in the y-dimension
+    stride_y = gridDim().y * blockDim().y
+    while it <= length(nsamp_t)
         Uprod = conj(U[it, ic1]) * U[it, ic2]
         if ik <= nsamp_t[it]
             S[cumsum_nsamp[it] + ik] = Uprod
-            return
         end
+        it += stride_y
     end
+    return
 end
 
 # Place elements of kernel in packed Λ
 function store_packed_kernel!(Λ, λ, kmask_indcs, ic1, ic2)
-    i = (blockIdx().x-1) * blockDim().x + threadIdx().x
+    ik = (blockIdx().x-1) * blockDim().x + threadIdx().x
 
     # Packed storage of Λ by columns
     ind_packed = ic1 + ic2 * (ic2-1) ÷ 2
-    if i <= length(kmask_indcs)
-        Λ[ind_packed, i] = λ[kmask_indcs[i]]
+    if ik <= length(kmask_indcs)
+        Λ[ind_packed, ik] = λ[kmask_indcs[ik]]
     end
     return
 end
 
 # For complex basis U
 function kernel_mul!(kL2_rs, Λ::CuDeviceMatrix{Tc}, kL1_rs, kmask_indcs, ind_lookup) where {Tc <: Complex}
-    i = (blockIdx().x-1) * blockDim().x + threadIdx().x
-    j = (blockIdx().y-1) * blockDim().y + threadIdx().y
+    ik  = (blockIdx().x-1) * blockDim().x + threadIdx().x
+    ic1 = (blockIdx().y-1) * blockDim().y + threadIdx().y
 
-    if i <= length(kmask_indcs) && j <= size(kL2_rs, 2)
-        ind = kmask_indcs[i]
+    if ik <= length(kmask_indcs) && ic1 <= size(kL2_rs, 2)
+        ind = kmask_indcs[ik]
         acc = zero(eltype(kL2_rs))
 
-        @inbounds for k ∈ axes(ind_lookup, 2)
+        @inbounds for ic2 ∈ axes(ind_lookup, 2)
             if k >= j
-                ind_packed = ind_lookup[j, k]
-                acc += Λ[ind_packed, i] * kL1_rs[ind, k]
+                ind_packed = ind_lookup[ic1, ic2]
+                acc += Λ[ind_packed, ik] * kL1_rs[ind, ic2]
             else
-                ind_packed = ind_lookup[k, j]
-                acc += conj(Λ[ind_packed, i]) * kL1_rs[ind, k]
+                ind_packed = ind_lookup[ic2, ic1]
+                acc += conj(Λ[ind_packed, ik]) * kL1_rs[ind, ic2]
             end
         end
-        kL2_rs[ind, j] = acc
+        kL2_rs[ind, ic1] = acc
     end
     return
 end
 
 # For real basis U
 function kernel_mul!(kL2_rs, Λ::CuDeviceMatrix{T}, kL1_rs, kmask_indcs, ind_lookup) where {T <: Real}
-    i = (blockIdx().x-1) * blockDim().x + threadIdx().x
-    j = (blockIdx().y-1) * blockDim().y + threadIdx().y
+    ik  = (blockIdx().x-1) * blockDim().x + threadIdx().x
+    ic1 = (blockIdx().y-1) * blockDim().y + threadIdx().y
 
-    if i <= length(kmask_indcs) && j <= size(kL2_rs, 2)
-        ind = kmask_indcs[i]
+    if ik <= length(kmask_indcs) && ic1 <= size(kL2_rs, 2)
+        ind = kmask_indcs[ik]
         acc = zero(eltype(kL2_rs))
 
-        @inbounds for k ∈ axes(ind_lookup, 2)
-            ind_packed = ind_lookup[j, k]
-            acc += Λ[ind_packed, i] * kL1_rs[ind, k]
+        @inbounds for ic2 ∈ axes(ind_lookup, 2)
+            ind_packed = ind_lookup[ic1, ic2]
+            acc += Λ[ind_packed, ik] * kL1_rs[ind, ic2]
         end
 
-        kL2_rs[ind, j] = acc
+        kL2_rs[ind, ic1] = acc
     end
     return
+end
+
+function launch_config_kernel(nsamp_t, kmask_indcs)
+    n_timeframes = length(nsamp_t)
+    max_frame_samples = maximum(nsamp_t)
+    max_threads = attribute(device(), CUDA.DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK)
+    max_blocks_y = attribute(device(), CUDA.DEVICE_ATTRIBUTE_MAX_GRID_DIM_Y)
+
+    # kernel threads/blocks settings for multiply_basis_vectors!
+    threads_x = min(max_threads, max_frame_samples)
+    threads_y = min(max_threads ÷ threads_x, n_timeframes)
+    threads_multiply = (threads_x, threads_y)
+
+    blocks_x = ceil(Int, max_frame_samples / threads_x)
+    blocks_y = min(ceil(Int, n_timeframes / threads_y), max_blocks_y)
+    blocks_multiply = (blocks_x, blocks_y)
+
+    # kernel threads/blocks settings for store_packed_kernel!
+    threads_store = min(max_threads, length(kmask_indcs))
+    blocks_store = ceil.(Int, length(kmask_indcs) / threads_store)
+
+    return threads_multiply, blocks_multiply, threads_store, blocks_store
 end

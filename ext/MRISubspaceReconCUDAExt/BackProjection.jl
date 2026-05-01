@@ -1,5 +1,5 @@
 function MRISubspaceRecon.calculate_backprojection(data::CuArray{Tc,3}, trj::CuArray{T,3}, img_shape; U=cu(I(size(trj, 3))), sample_mask=CUDA.ones(Bool, size(trj)[2:end]), density_compensation=:none, verbose=false) where {T<:Real,Tc<:Complex{T}}
-    nsamp_t = dropdims(sum(sample_mask; dims=1); dims=1) # number of samples per time frame
+    nsamp_t = vec(sum(sample_mask; dims=1)) # number of samples per time frame
     Ncoef = size(U, 2)
     Ncoil = size(data, 3)
     Uc = conj(U)
@@ -16,11 +16,12 @@ function MRISubspaceRecon.calculate_backprojection(data::CuArray{Tc,3}, trj::CuA
     xbp = CUDA.zeros(Tc, img_shape..., Ncoef, Ncoil)
     data_temp = CuArray{Tc}(undef, sum(nsamp_t))
 
-    # Apply sampling mask to data and perform backprojection
-    threads, blocks = default_launch_config(nsamp_t)
+    # Configure threads and blocks for kernel within coefficient loop
+    threads, blocks = launch_config_backprojection(nsamp_t)
+
     verbose && println("calculating backprojection...")
     flush(stdout)
-    t = @elapsed for icoil ∈ axes(data, 3)
+    t = @elapsed CUDA.@sync for icoil ∈ axes(data, 3)
         for icoef ∈ axes(U, 2)
             copyto!(data_temp, @view data[sample_mask, icoil])
             @cuda threads=threads blocks=blocks multiply_data_with_basis!(data_temp, Uc, nsamp_t, cumsum_nsamp, icoef)
@@ -34,7 +35,7 @@ function MRISubspaceRecon.calculate_backprojection(data::CuArray{Tc,3}, trj::CuA
 end
 
 function MRISubspaceRecon.calculate_backprojection(data::CuArray{Tc,3}, trj::CuArray{T,3}, cmaps::AbstractVector{<:CuArray{Tc,N}}; U=cu(I(size(trj, 3))), sample_mask=CUDA.ones(Bool, size(trj)[2:end]), density_compensation=:none, verbose=false) where {T<:Real,Tc<:Complex{T},N}
-    nsamp_t = dropdims(sum(sample_mask; dims=1); dims=1) # number of samples per time frame
+    nsamp_t = vec(sum(sample_mask; dims=1)) # number of samples per time frame
     Ncoef = size(U, 2)
     img_shape = size(cmaps[1])
     Uc = conj(U)
@@ -52,11 +53,12 @@ function MRISubspaceRecon.calculate_backprojection(data::CuArray{Tc,3}, trj::CuA
     xtmp = CuArray{Tc}(undef, img_shape)
     data_temp = CuArray{Tc}(undef, sum(nsamp_t))
 
-    # Apply sampling sample_mask to data and perform backprojection
-    threads, blocks = default_launch_config(nsamp_t)
+    # Configure threads and blocks for kernel within coefficient loop
+    threads, blocks = launch_config_backprojection(nsamp_t)
+    
     verbose && println("calculating backprojection...")
     flush(stdout)
-    t = @elapsed for icoil ∈ eachindex(cmaps)
+    t = @elapsed CUDA.@sync for icoil ∈ eachindex(cmaps)
         for icoef ∈ axes(U, 2)
             copyto!(data_temp, @view data[sample_mask, icoil])
             @cuda threads=threads blocks=blocks multiply_data_with_basis!(data_temp, Uc, nsamp_t, cumsum_nsamp, icoef)
@@ -86,22 +88,33 @@ function multiply_data_with_basis!(data_temp, Uc, nsamp_t, cumsum_nsamp, icoef)
     ik = (blockIdx().x - 1) * blockDim().x + threadIdx().x
     it = (blockIdx().y - 1) * blockDim().y + threadIdx().y
 
-    # Multiply data by basis, accounting for varying number of samples per time frame
-    if it <= length(nsamp_t)
+    # Grid-stride loop over time frames to handle cases where the number of
+    # time frames exceeds the maximum number of blocks in the y-dimension
+    stride_y = gridDim().y * blockDim().y
+    while it <= length(nsamp_t)
         if ik <= nsamp_t[it]
             ik_abs = cumsum_nsamp[it] + ik # absolute sample index
             data_temp[ik_abs] *= Uc[it, icoef]
-            return
         end
+        it += stride_y
     end
+    return
 end
 
 # Default threading for back projection
-function default_launch_config(nsamp_t)
+function launch_config_backprojection(nsamp_t)
     max_threads = attribute(device(), CUDA.DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK)
-    threads_x = min(max_threads, maximum(nsamp_t))
-    threads_y = min(max_threads ÷ threads_x, length(nsamp_t))
+    max_blocks_y = attribute(device(), CUDA.DEVICE_ATTRIBUTE_MAX_GRID_DIM_Y)
+
+    n_timeframes = length(nsamp_t)
+    max_frame_samples = maximum(nsamp_t)  # largest number of samples in any single frame
+    threads_x = min(max_threads, max_frame_samples)
+    threads_y = min(max_threads ÷ threads_x, n_timeframes)
     threads = (threads_x, threads_y)
-    blocks = ceil.(Int, (maximum(nsamp_t), length(nsamp_t)) ./ threads) # samples as inner index
+
+    blocks_x = ceil(Int, max_frame_samples / threads_x)
+    blocks_y = min(ceil(Int, n_timeframes / threads_y), max_blocks_y)
+    blocks = (blocks_x, blocks_y)
+
     return threads, blocks
 end
