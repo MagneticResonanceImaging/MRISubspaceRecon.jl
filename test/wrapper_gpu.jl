@@ -1,6 +1,5 @@
 # test wrapped method calls for gpu
 
-using BenchmarkTools
 using MRISubspaceRecon
 using ImagePhantoms
 using LinearAlgebra

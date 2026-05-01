@@ -1,4 +1,3 @@
-using BenchmarkTools
 using MRISubspaceRecon
 using ImagePhantoms
 using LinearAlgebra

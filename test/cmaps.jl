@@ -1,6 +1,5 @@
 # test coil map estimates
 
-using BenchmarkTools
 using MRISubspaceRecon
 using ImagePhantoms
 using LinearAlgebra

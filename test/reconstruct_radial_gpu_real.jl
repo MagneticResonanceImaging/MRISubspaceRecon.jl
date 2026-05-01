@@ -1,7 +1,6 @@
 using MRISubspaceRecon
 using CUDA
 using LinearAlgebra
-using BenchmarkTools
 using Test
 using FFTW
 using IterativeSolvers

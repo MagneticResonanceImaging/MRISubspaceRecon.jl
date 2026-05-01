@@ -1,6 +1,5 @@
 # test wrapped method calls
 
-using BenchmarkTools
 using MRISubspaceRecon
 using ImagePhantoms
 using LinearAlgebra

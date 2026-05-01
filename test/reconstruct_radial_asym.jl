@@ -1,7 +1,6 @@
 # test kernel calculation with real basis and use an asymmetric trajectory for
 # tests with a complex point spread function
 
-using BenchmarkTools
 using MRISubspaceRecon
 using ImagePhantoms
 using LinearAlgebra
