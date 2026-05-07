@@ -25,13 +25,13 @@ Differentiate between functions exploiting a pre-calculated kernel basis `Λ` an
 1. Tamir JI, et al. “T2 shuffling: Sharp, multicontrast, volumetric fast spin-echo imaging”. Magn Reson Med. 77.1 (2017), pp. 180–195. https://doi.org/10.1002/mrm.26102
 2. Assländer J, et al. “Low rank alternating direction method of multipliers reconstruction for MR fingerprinting”. Magn Reson Med 79.1 (2018), pp. 83–96. https://doi.org/10.1002/mrm.26639
 """
-function FFTNormalOp(img_shape, trj::AbstractArray{<:Integer, 3}, U::AbstractArray{Tc,2}; cmaps=(1,), sample_mask=trues(size(trj)[2:end]), num_fft_threads=round(Int, Threads.nthreads()/size(U, 2))) where {Tc <: Union{<:AbstractFloat, Complex{<:AbstractFloat}}}
+function FFTNormalOp(img_shape, trj::AbstractArray{<:Integer, 3}, U; cmaps=(1,), sample_mask=trues(size(trj)[2:end]), num_fft_threads=round(Int, Threads.nthreads()/size(U, 2)))
     Λ = calculate_kernel_cartesian(img_shape, trj, U; sample_mask)
     return FFTNormalOp(Λ; cmaps, num_fft_threads)
 end
 
 # Wrapper for 4D data arrays
-function FFTNormalOp(img_shape, trj::AbstractArray{<:Integer,4}, U::AbstractArray{Tc,2}; sample_mask=trues(size(trj)[2:end]), kwargs...) where {Tc <: Union{<:AbstractFloat, Complex{<:AbstractFloat}}}
+function FFTNormalOp(img_shape, trj::AbstractArray{<:Integer,4}, U; sample_mask=trues(size(trj)[2:end]), kwargs...)
     trj = reshape(trj, size(trj, 1), :, size(trj,4))
     sample_mask = reshape(sample_mask, :, size(sample_mask,3))
     return FFTNormalOp(img_shape, trj, U; sample_mask, kwargs...)
@@ -73,19 +73,19 @@ end
 ## ##########################################################################
 # Internal use
 #############################################################################
-struct _FFTNormalOp{S,ΛType,T,N,E,F,G}
+struct _FFTNormalOp{S,E,F,G,H,I,J,K}
     shape::S
     Ncoeff::Int
     fftplan::E
     ifftplan::F
-    Λ::ΛType
-    kmask_indcs::Vector{Int}
-    kL1::Array{Complex{T},N}
-    kL2::Array{Complex{T},N}
-    cmaps::G
+    Λ::G
+    kmask_indcs::H
+    kL1::I
+    kL2::J
+    cmaps::K
 end
 
-function calculate_kernel_cartesian(img_shape, trj, U; sample_mask=trues(size(trj)[2:end]), verbose=false)
+function calculate_kernel_cartesian(img_shape, trj::AbstractArray{<:Integer,3}, U; sample_mask=trues(size(trj)[2:end]), verbose=false)
     Ncoeff = size(U, 2)
     Λ = zeros(eltype(U), Ncoeff, Ncoeff, img_shape...)
 
