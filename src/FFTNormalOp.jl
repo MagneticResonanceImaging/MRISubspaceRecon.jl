@@ -25,9 +25,16 @@ Differentiate between functions exploiting a pre-calculated kernel basis `Λ` an
 1. Tamir JI, et al. “T2 shuffling: Sharp, multicontrast, volumetric fast spin-echo imaging”. Magn Reson Med. 77.1 (2017), pp. 180–195. https://doi.org/10.1002/mrm.26102
 2. Assländer J, et al. “Low rank alternating direction method of multipliers reconstruction for MR fingerprinting”. Magn Reson Med 79.1 (2018), pp. 83–96. https://doi.org/10.1002/mrm.26639
 """
-function FFTNormalOp(img_shape, trj, U; cmaps=(1,), sample_mask=trues(size(trj)[2:end]), num_fft_threads=round(Int, Threads.nthreads()/size(U, 2)))
+function FFTNormalOp(img_shape, trj::AbstractArray{<:Integer, 3}, U::AbstractArray{Tc,2}; cmaps=(1,), sample_mask=trues(size(trj)[2:end]), num_fft_threads=round(Int, Threads.nthreads()/size(U, 2))) where {Tc <: Union{<:AbstractFloat, Complex{<:AbstractFloat}}}
     Λ = calculate_kernel_cartesian(img_shape, trj, U; sample_mask)
     return FFTNormalOp(Λ; cmaps, num_fft_threads)
+end
+
+# Wrapper for 4D data arrays
+function FFTNormalOp(img_shape, trj::AbstractArray{<:Integer,4}, U::AbstractArray{Tc,2}; sample_mask=trues(size(trj)[2:end]), kwargs...) where {Tc <: Union{<:AbstractFloat, Complex{<:AbstractFloat}}}
+    trj = reshape(trj, size(trj, 1), :, size(trj,4))
+    sample_mask = reshape(sample_mask, :, size(sample_mask,3))
+    return FFTNormalOp(img_shape, trj, U; sample_mask, kwargs...)
 end
 
 function FFTNormalOp(M, U; cmaps=(1,), num_fft_threads=round(Int, Threads.nthreads()/size(U, 2)))
