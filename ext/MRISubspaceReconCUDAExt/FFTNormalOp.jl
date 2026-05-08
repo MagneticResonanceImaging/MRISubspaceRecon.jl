@@ -27,7 +27,19 @@ function MRISubspaceRecon.FFTNormalOp(Λ::CuArray{Tc}; cmaps=(1,), eltype_x=elty
     fftplan  = plan_fft!(kL1, 1:length(img_shape))
     ifftplan = plan_ifft!(kL2, 1:length(img_shape))
 
-    A = MRISubspaceRecon._FFTNormalOp(img_shape, Ncoeff, fftplan, ifftplan, Λ, kmask_indcs, kL1, kL2, cmaps)
+    # Pre-compute kernel launch configuration
+    Nk = size(Λ, 3)
+    kL1_rs = reshape(kL1, :, Ncoeff)
+    kL2_rs = reshape(kL2, :, Ncoeff)
+    kernel = @cuda launch=false kernel_mul_cartesian!(kL2_rs, Λ, kL1_rs, kmask_indcs)
+    config = launch_configuration(kernel.fun)
+
+    threads_x = min(config.threads ÷ Ncoeff, Nk)
+    threads_y = min(config.threads ÷ threads_x, Ncoeff)
+    threads = (threads_x, threads_y)
+    blocks = cld.((Nk, Ncoeff), threads)
+
+    A = MRISubspaceRecon._FFTNormalOp(img_shape, Ncoeff, fftplan, ifftplan, Λ, kmask_indcs, kL1, kL2, cmaps, threads, blocks)
 
     return LinearOperator(
         eltype_x,
@@ -43,7 +55,7 @@ function MRISubspaceRecon.FFTNormalOp(Λ::CuArray{Tc}; cmaps=(1,), eltype_x=elty
 end
 
 ## ##########################################################################
-# Kernel Calculation
+# Internal use
 #############################################################################
 
 function calculate_kernel_cartesian(img_shape, trj::CuArray{<:Integer,3}, U; sample_mask=CUDA.ones(Bool, size(trj)[2:end]), verbose=false)
@@ -59,12 +71,12 @@ function calculate_kernel_cartesian(img_shape, trj::CuArray{<:Integer,3}, U; sam
     verbose && println("calculating Cartesian kernel on GPU...")
     t = @elapsed CUDA.@sync begin
         # Configure kernel launch
-        kernel = @cuda launch=false _kernel_cartesian_complex!(Λ_real, trj, U, sample_mask, img_shape, Ncoeff, Nsamp, Nt, Nrep)
+        kernel = @cuda launch=false kernel_cartesian_complex!(Λ_real, trj, U, sample_mask, img_shape, Ncoeff, Nsamp, Nt, Nrep)
         config = launch_configuration(kernel.fun)
         threads = min(config.threads, Nsamp)
         blocks = cld(Nsamp, threads)
 
-        @cuda threads=threads blocks=blocks _kernel_cartesian_complex!(Λ_real, trj, U, sample_mask, img_shape, Ncoeff, Nsamp, Nt, Nrep)
+        @cuda threads=threads blocks=blocks kernel_cartesian_complex!(Λ_real, trj, U, sample_mask, img_shape, Ncoeff, Nsamp, Nt, Nrep)
     end
     verbose && println("time to compute kernel: t = $t s")
 
@@ -74,7 +86,7 @@ function calculate_kernel_cartesian(img_shape, trj::CuArray{<:Integer,3}, U; sam
     return Λ
 end
 
-function _kernel_cartesian_complex!(Λ_real, trj, U, sample_mask, img_shape::NTuple{N,Int}, Ncoeff, Nsamp, Nt, Nrep) where N
+function kernel_cartesian_complex!(Λ_real, trj, U, sample_mask, img_shape::NTuple{N,Int}, Ncoeff, Nsamp, Nt, Nrep) where N
     is = (blockIdx().x - 1) * blockDim().x + threadIdx().x
 
     if is <= Nsamp
@@ -91,7 +103,7 @@ function _kernel_cartesian_complex!(Λ_real, trj, U, sample_mask, img_shape::NTu
                     for irep in 1:Nrep
                         val += conj(U[it, ic1, irep]) * U[it, ic2, irep]
                     end
-                    # CUDA atomics don't support complex directly, so split into real/imag
+                    # CUDA atomics does not support complex directly, so split into real/imag
                     CUDA.@atomic Λ_real[1, ic1, ic2, k_idx...] += real(val)
                     CUDA.@atomic Λ_real[2, ic1, ic2, k_idx...] += imag(val)
                 end
@@ -126,9 +138,7 @@ function LinearAlgebra.mul!(x::CuArray, S::MRISubspaceRecon._FFTNormalOp, b, α,
         kL2_rs = reshape(S.kL2, :, S.Ncoeff)
         fill!(S.kL2, 0)
 
-        # Batched matrix multiplication at each masked k-space location
-        # Each kmask_indcs[i] indexes a row in kL1_rs/kL2_rs, and Λ[:,:,i] is the kernel matrix
-        _batched_kernel_mul!(kL2_rs, S.Λ, kL1_rs, S.kmask_indcs)
+        @cuda threads=S.threads blocks=S.blocks kernel_mul_cartesian!(kL2_rs, S.Λ, kL1_rs, S.kmask_indcs)
 
         # Inverse FFT and accumulate
         S.ifftplan * S.kL2
@@ -137,23 +147,7 @@ function LinearAlgebra.mul!(x::CuArray, S::MRISubspaceRecon._FFTNormalOp, b, α,
     return x
 end
 
-# Batched kernel multiplication on GPU
-function _batched_kernel_mul!(kL2_rs::CuArray, Λ::CuArray, kL1_rs::CuArray, kmask_indcs)
-    Ncoeff = size(Λ, 1)
-    Nk = size(Λ, 3)
-
-    kernel = @cuda launch=false _kernel_mul_cartesian!(kL2_rs, Λ, kL1_rs, kmask_indcs)
-    config = launch_configuration(kernel.fun)
-
-    threads_x = min(config.threads ÷ Ncoeff, Nk)
-    threads_y = min(config.threads ÷ threads_x, Ncoeff)
-    threads = (threads_x, threads_y)
-    blocks = cld.((Nk, Ncoeff), threads)
-
-    @cuda threads=threads blocks=blocks _kernel_mul_cartesian!(kL2_rs, Λ, kL1_rs, kmask_indcs)
-end
-
-function _kernel_mul_cartesian!(kL2_rs, Λ, kL1_rs, kmask_indcs)
+function kernel_mul_cartesian!(kL2_rs, Λ, kL1_rs, kmask_indcs)
     ik  = (blockIdx().x - 1) * blockDim().x + threadIdx().x
     ic1 = (blockIdx().y - 1) * blockDim().y + threadIdx().y
 
