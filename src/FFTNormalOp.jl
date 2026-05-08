@@ -56,7 +56,7 @@ function FFTNormalOp(Λ; cmaps=(1,), num_fft_threads=round(Int, Threads.nthreads
     ktmp = @view kL1[CartesianIndices(img_shape), 1]
     fftplan = plan_fft!(ktmp; flags=FFTW.MEASURE, num_threads=num_fft_threads)
     ifftplan = plan_ifft!(ktmp; flags=FFTW.MEASURE, num_threads=num_fft_threads)
-    A = _FFTNormalOp(img_shape, Ncoeff, fftplan, ifftplan, Λ, kmask_indcs, kL1, kL2, cmaps)
+    A = _FFTNormalOp(img_shape, Ncoeff, fftplan, ifftplan, Λ, kmask_indcs, kL1, kL2, cmaps, nothing, nothing)
 
     return LinearOperator(
         eltype_x,
@@ -73,7 +73,7 @@ end
 ## ##########################################################################
 # Internal use
 #############################################################################
-struct _FFTNormalOp{S,E,F,G,H,I,J,K}
+struct _FFTNormalOp{S,E,F,G,H,I,J,K,L,M}
     shape::S
     Ncoeff::Int
     fftplan::E
@@ -83,6 +83,8 @@ struct _FFTNormalOp{S,E,F,G,H,I,J,K}
     kL1::I
     kL2::J
     cmaps::K
+    threads::L
+    blocks::M
 end
 
 function calculate_kernel_cartesian(img_shape, trj::AbstractArray{<:Integer,3}, U; sample_mask=trues(size(trj)[2:end]), verbose=false)
