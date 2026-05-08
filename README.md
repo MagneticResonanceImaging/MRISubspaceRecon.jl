@@ -9,7 +9,7 @@
 
 MRISubspaceRecon.jl is a Julia package that implements sub-space reconstructions as described by [Jon Tamir et al.](https://onlinelibrary.wiley.com/doi/abs/10.1002/mrm.26102) and by us in the paper [Low-rank alternating direction method of multipliers reconstruction for MR fingerprinting](https://doi.org/10.1002/mrm.26639) as *low rank inversion*.
 
-Currently, the package supports Cartesian and non-Cartesian trajectories on CPU, and non-Cartesian ones for NVIDIA GPUs. The package is still work in progress. The ultimate goal of this package is to provide a comprehensive Julia implementation of MRI subspace reconstructions, similar to our [Matlab package](https://bitbucket.org/asslaender/nyu_mrf_recon).
+Currently, the package supports Cartesian and non-Cartesian trajectories on single- or multithreaded CPUs, as well as NVIDIA GPUs. The package is still under active development. Its ultimate goal is to provide a comprehensive Julia implementation for MRI subspace reconstructions, analagous to our [Matlab package](https://bitbucket.org/asslaender/nyu_mrf_recon).
 
 
 [docs-img]: https://img.shields.io/badge/docs-latest%20release-blue.svg
