@@ -13,5 +13,6 @@ using CUDA
 include("NFFTNormalOp.jl")
 include("BackProjection.jl")
 include("CoilMaps.jl")
+include("FFTNormalOp.jl")
 
 end # module

@@ -82,6 +82,98 @@ end
 
 
 ## ##########################################################################
+# Cartesian backprojection (Integer trajectory) on GPU
+#############################################################################
+function MRISubspaceRecon.calculate_backprojection(data::CuArray{Tc}, trj::CuArray{<:Integer,3}, cmaps::AbstractVector{<:CuArray}; U=cu(I(size(trj)[end])), sample_mask=CUDA.ones(Bool, size(trj)[2:end])) where {Tc <: Complex}
+    Ncoeff = size(U, 2)
+    img_shape = size(cmaps[1])
+    img_idx = CartesianIndices(img_shape)
+    T = real(eltype(data))
+
+    dataU_real = CUDA.zeros(T, 2, img_shape...)
+    dataU = CuArray{eltype(data)}(undef, img_shape)
+    xbp = CUDA.zeros(eltype(data), img_shape..., Ncoeff)
+
+    ifftplan = plan_ifft!(dataU)
+
+    Nsamp = size(trj, 2)
+    Nt = size(trj, 3)
+    Nrep = size(U, 3)
+
+    # Configure kernel launch
+    kernel = @cuda launch=false _cartesian_backprojection_kernel!(dataU_real, data, trj, U, sample_mask, img_shape, 1, 1, Nsamp, Nt, Nrep)
+    config = launch_configuration(kernel.fun)
+    threads = min(config.threads, Nsamp)
+    blocks = cld(Nsamp, threads)
+
+    for icoef in axes(U, 2)
+        for icoil in axes(data, 3)
+            fill!(dataU_real, 0)
+            @cuda threads=threads blocks=blocks _cartesian_backprojection_kernel!(dataU_real, data, trj, U, sample_mask, img_shape, icoef, icoil, Nsamp, Nt, Nrep)
+            dataU .= reshape(reinterpret(eltype(data), vec(dataU_real)), img_shape)
+            ifftplan * dataU
+            @views xbp[img_idx, icoef] .+= conj.(cmaps[icoil]) .* fftshift(dataU)
+        end
+    end
+    return xbp
+end
+
+function MRISubspaceRecon.calculate_backprojection(data::CuArray{Tc}, trj::CuArray{<:Integer,3}, img_shape; U=cu(I(size(trj)[end])), sample_mask=CUDA.ones(Bool, size(trj)[2:end])) where {Tc <: Complex}
+    Ncoeff = size(U, 2)
+    Ncoil = size(data, 3)
+    img_idx = CartesianIndices(img_shape)
+    T = real(eltype(data))
+
+    dataU_real = CUDA.zeros(T, 2, img_shape...)
+    dataU = CuArray{eltype(data)}(undef, img_shape)
+    xbp = CUDA.zeros(eltype(data), img_shape..., Ncoeff, Ncoil)
+
+    ifftplan = plan_ifft!(dataU)
+
+    Nsamp = size(trj, 2)
+    Nt = size(trj, 3)
+    Nrep = size(U, 3)
+
+    # Configure kernel launch
+    kernel = @cuda launch=false _cartesian_backprojection_kernel!(dataU_real, data, trj, U, sample_mask, img_shape, 1, 1, Nsamp, Nt, Nrep)
+    config = launch_configuration(kernel.fun)
+    threads = min(config.threads, Nsamp)
+    blocks = cld(Nsamp, threads)
+
+    for icoef in axes(U, 2)
+        for icoil in axes(data, 3)
+            fill!(dataU_real, 0)
+            @cuda threads=threads blocks=blocks _cartesian_backprojection_kernel!(dataU_real, data, trj, U, sample_mask, img_shape, icoef, icoil, Nsamp, Nt, Nrep)
+            dataU .= reshape(reinterpret(eltype(data), vec(dataU_real)), img_shape)
+            ifftplan * dataU
+            @views xbp[img_idx, icoef, icoil] .= fftshift(dataU)
+        end
+    end
+    return xbp
+end
+
+function _cartesian_backprojection_kernel!(dataU_real, data, trj, U, sample_mask, img_shape::NTuple{N,Int}, icoef, icoil, Nsamp, Nt, Nrep) where N
+    is = (blockIdx().x - 1) * blockDim().x + threadIdx().x
+
+    if is <= Nsamp
+        for it in 1:Nt
+            if sample_mask[is, it]
+                k_idx = ntuple(Val(N)) do j
+                    mod1(Int(trj[j, is, it]) - img_shape[j] ÷ 2, img_shape[j])
+                end
+
+                for irep in 1:Nrep
+                    val = data[is, it, icoil, irep] * conj(U[it, icoef, irep])
+                    CUDA.@atomic dataU_real[1, k_idx...] += real(val)
+                    CUDA.@atomic dataU_real[2, k_idx...] += imag(val)
+                end
+            end
+        end
+    end
+    return
+end
+
+## ##########################################################################
 # Internal helper functions
 #############################################################################
 function multiply_data_with_basis!(data_temp, Uc, nsamp_t, cumsum_nsamp, icoef)

@@ -4,7 +4,7 @@ CurrentModule = MRISubspaceRecon
 
 # MRISubspaceRecon.jl
 
-[MRISubspaceRecon.jl](https://github.com/MagneticResonanceImaging/MRISubspaceRecon.jl) package package aims to enable rapid iterative reconstruction
+The [MRISubspaceRecon.jl](https://github.com/MagneticResonanceImaging/MRISubspaceRecon.jl) package aims to enable rapid iterative reconstruction 
 of Cartesian and non-Cartesian MRI data using subspace modeling [1,2]. Particular care is given to enable the reconstruction of large numbers of subspace coefficients along with large image grid sizes.
 
 For compatibility with other Julia packages, such as [IterativeSolvers.jl](https://github.com/JuliaLinearAlgebra/IterativeSolvers.jl) and [RegularizedLeastSquares.jl](https://github.com/JuliaImageRecon/RegularizedLeastSquares.jl), operations are defined in terms of linear operators and their effects on the data vectors. [MRISubspaceRecon.jl](https://github.com/MagneticResonanceImaging/MRISubspaceRecon.jl) is designed to compute these objects with multi-threaded CPUs and on NVIDIA GPUs. The package further contains functions to perform GRAPPA operator gridding (GROG) [3] or to generate radial trajectories. However, all methods that require an explicit k-space trajectory as input generalize to arbitrary trajectories.
@@ -31,7 +31,7 @@ Reconstructions of non-Cartesian MRI in [MRISubspaceRecon.jl](https://github.com
 using MRISubspaceRecon
 using CUDA
 ```
-We recommend using the GPU code which can be faster by a factor of 10--20 than CPU multi-threading (for typical solvers like conjugate gradient or FISTA [7]). However, a specific GPU implementation for Cartesian MRI is still under development. In this case, one can use the CPU implementation or the non-Cartesian methods.
+We recommend using the GPU code which can be faster by a factor of 10--20 than CPU multi-threading (for typical solvers like conjugate gradient or FISTA [7]).
 
 # References
 1. Assländer J, et al. “Low rank alternating direction method of multipliers reconstruction for MR fingerprinting”. Magn Reson Med 79.1 (2018), pp. 83–96. https://doi.org/10.1002/mrm.26639
