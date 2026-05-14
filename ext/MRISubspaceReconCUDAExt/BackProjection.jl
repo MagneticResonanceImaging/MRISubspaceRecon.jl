@@ -124,7 +124,7 @@ end
 function MRISubspaceRecon.calculate_backprojection(data::CuArray{Tc}, trj::CuArray{<:Integer,3}, img_shape; U=cu(I(size(trj)[end])), sample_mask=CUDA.ones(Bool, size(trj)[2:end])) where {Tc <: Complex}
     trj_cpu = Array(trj)
     mask_cpu = Array(sample_mask)
-    @assert all(d -> all((@view(trj_cpu[d, :, :])[mask_cpu]) .>= 1) && all((@view(trj_cpu[d, :, :])[mask_cpu]) .<= img_shape[d]), 1:size(trj, 1)) "Cartesian trajectory values must be in the range 1:img_shape[d] for each dimension d. Consider shifting the trajectory."
+    @assert all(d -> all((@view(trj_cpu[d, :, :])[mask_cpu]) .>= 1) && all((@view(trj_cpu[d, :, :])[mask_cpu]) .<= img_shape[d]), 1:size(trj, 1)) "Cartesian trajectory values must be in the range 1:img_shape[d] for each dimension d."
     Ncoeff = size(U, 2)
     Ncoil = size(data, 3)
     img_idx = CartesianIndices(img_shape)
