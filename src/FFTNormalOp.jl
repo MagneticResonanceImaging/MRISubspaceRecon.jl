@@ -88,6 +88,7 @@ struct _FFTNormalOp{S,E,F,G,H,I,J,K,L,M}
 end
 
 function calculate_kernel_cartesian(img_shape, trj::AbstractArray{<:Integer,3}, U; sample_mask=trues(size(trj)[2:end]), verbose=false)
+    @assert all(d -> all((@view(trj[d, :, :])[sample_mask]) .>= 1) && all((@view(trj[d, :, :])[sample_mask]) .<= img_shape[d]), 1:size(trj, 1)) "Cartesian trajectory values must be in the range 1:img_shape[d] for each dimension d."
     Ncoeff = size(U, 2)
     Λ = zeros(eltype(U), Ncoeff, Ncoeff, img_shape...)
 

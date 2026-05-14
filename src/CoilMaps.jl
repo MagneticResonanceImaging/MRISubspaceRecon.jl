@@ -80,7 +80,9 @@ function calculate_coil_maps(
     mask_calib = dropdims(all(trj .> lower_bound; dims=1) .& all(trj .< upper_bound; dims=1); dims=1)
     mask_calib .&= sample_mask
 
-    x = reconstruct_coilwise(data, trj, calib_size; U, sample_mask=mask_calib, Niter_cg)
+    # Shift trajectory to 1:calib_size range for reconstruction on the calib grid
+    trj_calib = Int16.(trj .- lower_bound)
+    x = reconstruct_coilwise(data, trj_calib, calib_size; U, sample_mask=mask_calib, Niter_cg)
 
     imdims = ntuple(i -> i, length(img_shape))
     kbp = fftshift(x, imdims)

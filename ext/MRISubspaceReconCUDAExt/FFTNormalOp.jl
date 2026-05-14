@@ -59,6 +59,9 @@ end
 #############################################################################
 
 function calculate_kernel_cartesian(img_shape, trj::CuArray{<:Integer,3}, U; sample_mask=CUDA.ones(Bool, size(trj)[2:end]), verbose=false)
+    trj_cpu = Array(trj)
+    mask_cpu = Array(sample_mask)
+    @assert all(d -> all((@view(trj_cpu[d, :, :])[mask_cpu]) .>= 1) && all((@view(trj_cpu[d, :, :])[mask_cpu]) .<= img_shape[d]), 1:size(trj, 1)) "Cartesian trajectory values must be in the range 1:img_shape[d] for each dimension d."
     Ncoeff = size(U, 2)
     Nrep = size(U, 3) # number of repetitions (defaults to 1)
 

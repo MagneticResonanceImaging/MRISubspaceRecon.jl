@@ -106,6 +106,7 @@ end
 function calculate_backprojection(data::AbstractArray{Tc}, trj::AbstractArray{<:Integer,3}, cmaps::AbstractVector{<:AbstractArray}; U=I(size(trj)[end]), sample_mask=trues(size(trj)[2:end])) where {Tc <: Complex}
     Ncoeff = size(U, 2)
     img_shape = size(cmaps[1])
+    @assert all(d -> all((@view(trj[d, :, :])[sample_mask]) .>= 1) && all((@view(trj[d, :, :])[sample_mask]) .<= img_shape[d]), 1:size(trj, 1)) "Cartesian trajectory values must be in the range 1:img_shape[d] for each dimension d."
     img_idx = CartesianIndices(img_shape)
 
     dataU = similar(data, img_shape..., Ncoeff)
@@ -131,6 +132,7 @@ function calculate_backprojection(data::AbstractArray{Tc}, trj::AbstractArray{<:
 end
 
 function calculate_backprojection(data::AbstractArray{Tc}, trj::AbstractArray{<:Integer,3}, img_shape; U=I(size(trj)[end]), sample_mask=trues(size(trj)[2:end])) where {Tc <: Complex}
+    @assert all(d -> all((@view(trj[d, :, :])[sample_mask]) .>= 1) && all((@view(trj[d, :, :])[sample_mask]) .<= img_shape[d]), 1:size(trj, 1)) "Cartesian trajectory values must be in the range 1:img_shape[d] for each dimension d. Consider shifting the trajectory."
     Ncoeff = size(U, 2)
     Ncoil = size(data, 3)
     img_idx = CartesianIndices(img_shape)
