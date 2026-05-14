@@ -19,7 +19,7 @@ function MRISubspaceRecon.calculate_coil_maps(
     mask_calib .&= sample_mask # update mask to only take calib region of k-space in CoilwiseCG
 
     x = MRISubspaceRecon.reconstruct_coilwise(data, trj_calib, calib_size; U, sample_mask=mask_calib, Niter_cg)
-
+    
     imdims = ntuple(i -> i, length(img_shape))
     kbp = fftshift(x, imdims)
     fft!(kbp, imdims)
@@ -71,7 +71,9 @@ function MRISubspaceRecon.calculate_coil_maps(
     mask_calib .&= Array(sample_mask)
     mask_calib = cu(mask_calib)
 
-    x = MRISubspaceRecon.reconstruct_coilwise(data, trj, calib_size; U, sample_mask=mask_calib, Niter_cg)
+    # Shift trajectory to 1:calib_size range for reconstruction on the calib grid
+    trj_calib = CuArray{Int16}(trj .- lower_bound)
+    x = MRISubspaceRecon.reconstruct_coilwise(data, trj_calib, calib_size; U, sample_mask=mask_calib, Niter_cg)
 
     imdims = ntuple(i -> i, length(img_shape))
     kbp = fftshift(x, imdims)

@@ -112,7 +112,6 @@ function calculate_kernel_noncartesian(img_shape_os, trj::CuArray{T,3}, U::CuArr
    # Configure threads and blocks for each kernel within the coefficient loop
     threads_multiply, blocks_multiply, threads_store, blocks_store = launch_config_kernel(nsamp_t, kmask_indcs)
 
-
     verbose && println("calculating non-Cartesian kernel...")
     t = @elapsed CUDA.@sync for ic2 ∈ 1:Ncoeff, ic1 ∈ 1:Ncoeff
         if ic2 >= ic1 # eval. only upper triangular matrix
