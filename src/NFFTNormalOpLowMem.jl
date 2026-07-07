@@ -41,7 +41,7 @@ function NFFTNormalOpLowmem(
 
     phases = _compute_linphases(img_shape, T)
 
-    A = _NFFTNormalOpLowmem(img_shape, Ncoeff, fftplan, ifftplan, Λ_decomp, kmask_indcs, kL1, kL2, cmaps, phases)
+    A = _NFFTNormalOpLowmem(img_shape, Ncoeff, fftplan, ifftplan, Λ_decomp, kmask_indcs, kL1, kL2, cmaps, phases, nothing, nothing)
 
     return LinearOperator(
         Complex{T},
@@ -57,7 +57,7 @@ end
 #############################################################################
 # Internal struct
 #############################################################################
-struct _NFFTNormalOpLowmem{S,E,F,G,H,I,J,K,P}
+struct _NFFTNormalOpLowmem{S,E,F,G,H,I,J,K,P,M,N}
     shape::S
     Ncoeff::Int
     fftplan::E
@@ -68,6 +68,8 @@ struct _NFFTNormalOpLowmem{S,E,F,G,H,I,J,K,P}
     kL2::J
     cmaps::K
     phases::P       # (img_shape..., 2^D)
+    threads::M      # GPU thread config (nothing on CPU)
+    blocks::N       # GPU block config (nothing on CPU)
 end
 
 #############################################################################
