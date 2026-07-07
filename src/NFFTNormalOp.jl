@@ -34,11 +34,17 @@ function NFFTNormalOp(
     sample_mask=trues(size(trj)[2:end]),
     verbose=false,
     num_fft_threads=round(Int, Threads.nthreads()/size(U, 2)),
+    lowmem=false,
     ) where {T <: Real, Tc <: Union{T, Complex{T}}}
 
     Λ, kmask_indcs = calculate_kernel_noncartesian(2 .* img_shape, trj, U; sample_mask, verbose)
 
-    return NFFTNormalOp(img_shape, Λ, kmask_indcs; cmaps=cmaps, num_fft_threads=num_fft_threads)
+    if lowmem
+        Λ_d, kmask_d = decompose_kernel(img_shape, Λ, kmask_indcs)
+        return NFFTNormalOpLowmem(img_shape, Λ_d, kmask_d; cmaps, num_fft_threads)
+    else
+        return NFFTNormalOp(img_shape, Λ, kmask_indcs; cmaps=cmaps, num_fft_threads=num_fft_threads)
+    end
 end
 
 # Wrapper for 4D data arrays
