@@ -1,8 +1,8 @@
 # Test that the GPU low-memory (decomposed Toeplitz) operator produces
 # the same results as the standard GPU NFFTNormalOp.
 
-using MRISubspaceRecon
 using CUDA
+using MRISubspaceRecon
 using LinearAlgebra
 using Test
 using FFTW

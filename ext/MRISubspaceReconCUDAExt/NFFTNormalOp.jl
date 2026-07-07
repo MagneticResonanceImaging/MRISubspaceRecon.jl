@@ -247,7 +247,7 @@ function kernel_mul!(kL2_rs, Λ::CuDeviceMatrix{Tc}, kL1_rs, kmask_indcs, ind_lo
         acc = zero(eltype(kL2_rs))
 
         @inbounds for ic2 ∈ axes(ind_lookup, 2)
-            if k >= j
+            if ic1 <= ic2
                 ind_packed = ind_lookup[ic1, ic2]
                 acc += Λ[ind_packed, ik] * kL1_rs[ind, ic2]
             else
