@@ -1,21 +1,22 @@
 ## ##########################################################################
 # NFFTNormalOpLowMem - GPU implementation of decomposed Toeplitz trick
+# Kernel stored as (Ncoeff*(Ncoeff+1)÷2, n_kmask_1x, 2^D) — packed upper triangular
 #############################################################################
 
 function MRISubspaceRecon.NFFTNormalOpLowmem(
     img_shape,
-    Λ_decomp::CuArray{Tc,4},
+    Λ_decomp::CuArray{Tc,3},
     kmask_indcs::CuArray;
     cmaps=(1,)
     ) where {T <: Real, Tc <: Union{T, Complex{T}}}
 
-    Ncoeff = size(Λ_decomp, 1)
     D = length(img_shape)
     Nshift = 2^D
-    @assert size(Λ_decomp, 4) == Nshift
-    @assert length(kmask_indcs) == size(Λ_decomp, 3)
+    Ncoeff = (isqrt(8 * size(Λ_decomp, 1) + 1) - 1) ÷ 2
+    @assert size(Λ_decomp, 3) == Nshift
+    @assert length(kmask_indcs) == size(Λ_decomp, 2)
 
-    # Buffers on NON-oversampled grid (2^D times smaller!)
+    # Buffers on NON-oversampled grid
     kL1 = CuArray{Complex{T}}(undef, img_shape..., Ncoeff)
     kL2 = CuArray{Complex{T}}(undef, img_shape..., Ncoeff)
 
@@ -25,9 +26,12 @@ function MRISubspaceRecon.NFFTNormalOpLowmem(
     # Precompute phase ramps on GPU
     phases = CuArray(MRISubspaceRecon._compute_linphases(img_shape, T))
 
+    # Indexing into the upper triangular matrix
+    ind_lookup = CuArray([j<=k ? j+k*(k-1)÷2 : k+j*(j-1)÷2 for j ∈ 1:Ncoeff, k ∈ 1:Ncoeff])
+
     # Configure thread/block layout for the kernel_mul_lowmem! kernel
     kL1_rs = reshape(kL1, :, Ncoeff)
-    kernel = @cuda launch=false kernel_mul_lowmem!(kL1_rs, Λ_decomp, kL1_rs, kmask_indcs, Int32(1))
+    kernel = @cuda launch=false kernel_mul_lowmem!(kL1_rs, Λ_decomp, kL1_rs, kmask_indcs, ind_lookup, Int32(1))
     config = launch_configuration(kernel.fun)
 
     threads_x = min(config.threads ÷ Ncoeff, length(kmask_indcs))
@@ -36,7 +40,7 @@ function MRISubspaceRecon.NFFTNormalOpLowmem(
     blocks = cld.((length(kmask_indcs), Ncoeff), threads)
 
     A = MRISubspaceRecon._NFFTNormalOpLowmem(img_shape, Ncoeff, fftplan, ifftplan,
-        Λ_decomp, kmask_indcs, kL1, kL2, cmaps, phases, threads, blocks)
+        Λ_decomp, kmask_indcs, kL1, kL2, cmaps, phases, ind_lookup, threads, blocks)
 
     return LinearOperator(
         Complex{T},
@@ -51,30 +55,138 @@ function MRISubspaceRecon.NFFTNormalOpLowmem(
 end
 
 #############################################################################
-# Kernel decomposition on GPU
+# Direct kernel computation into decomposed packed shape (GPU)
 #############################################################################
 
-"""
-    decompose_kernel_gpu(img_shape, Λ_packed, kmask_indcs_os) -> (Λ_decomp, kmask_indcs_1x)
+# Complex basis U → complex kernel
+function MRISubspaceRecon.calculate_kernel_lowmem(img_shape, trj::CuArray{T,3}, U::CuArray{Tc};
+    sample_mask=CUDA.ones(Bool, size(trj)[2:end]), verbose=false) where {T <: Real, Tc <: Complex{T}}
 
-GPU version of kernel decomposition. Takes the packed upper-triangular kernel
-on the 2× grid and produces the full (Ncoeff, Ncoeff, n_kmask_1x, 2^D) decomposed
-kernel on the 1× grid.
-"""
-function decompose_kernel_gpu(img_shape, Λ_packed::CuArray, kmask_indcs_os, Ncoeff::Int)
-    T = real(eltype(Λ_packed))
     img_shape_os = 2 .* img_shape
     D = length(img_shape)
     Nshift = 2^D
 
-    # Ensure kmask is on CPU for index mapping (one-time cost)
-    kmask_os_cpu = kmask_indcs_os isa CuArray ? Array(kmask_indcs_os) : Vector(kmask_indcs_os)
+    kmask_indcs_os, kmask_indcs_1x, map_1x_cpu, map_shift_cpu = _compute_lowmem_mask_gpu(img_shape, img_shape_os, trj; sample_mask)
+
+    n1x = length(kmask_indcs_1x)
+    Ncoeff = size(U, 2)
+    Npacked = Ncoeff * (Ncoeff + 1) ÷ 2
+
+    Λ_decomp = CUDA.zeros(Complex{T}, Npacked, n1x, Nshift)
+
+    map_1x_gpu = CuArray(Int32.(map_1x_cpu))
+    map_shift_gpu = CuArray(Int32.(map_shift_cpu))
+    kmask_indcs_os_gpu = CuArray(kmask_indcs_os)
+
+    nsamp_t = cu(sum(sample_mask, dims=1))
+    cumsum_nsamp = CUDA.zeros(eltype(nsamp_t), size(nsamp_t))
+    cumsum_nsamp[2:end] = cumsum(nsamp_t[1:end-1])
+
+    λ  = CuArray{Complex{T}}(undef, img_shape_os)
+    λ2 = similar(λ)
+    S = CuArray{Complex{T}}(undef, sum(nsamp_t))
+
+    fftplan  = plan_fft(λ)
+    nfftplan = PlanNUFFT(Complex{T}, img_shape_os; backend=CUDABackend(), gpu_method=:shared_memory, gpu_batch_size=Val(200))
+    set_points!(nfftplan, NonuniformFFTs._transform_point_convention.(trj[:, sample_mask]))
+
+    threads_multiply, blocks_multiply, _, _ = launch_config_kernel(nsamp_t, kmask_indcs_os_gpu)
+
+    n_os = length(kmask_indcs_os)
+    max_threads = attribute(device(), CUDA.DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK)
+    scatter_threads = min(max_threads, n_os)
+    scatter_blocks = cld(n_os, scatter_threads)
+
+    verbose && println("calculating decomposed non-Cartesian kernel (complex, GPU)...")
+    t = @elapsed CUDA.@sync for ic2 ∈ 1:Ncoeff, ic1 ∈ 1:Ncoeff
+        if ic2 >= ic1
+            @cuda threads=threads_multiply blocks=blocks_multiply multiply_basis_vectors!(S, U, nsamp_t, cumsum_nsamp, ic1, ic2)
+
+            exec_type1!(λ2, nfftplan, vec(S))
+            mul!(λ, fftplan, λ2)
+
+            @cuda threads=scatter_threads blocks=scatter_blocks store_decomposed_kernel!(
+                Λ_decomp, λ, kmask_indcs_os_gpu, map_1x_gpu, map_shift_gpu, Int32(ic1), Int32(ic2))
+        end
+    end
+    verbose && println("time to compute kernel: t = $t s")
+
+    return Λ_decomp, CuArray(kmask_indcs_1x)
+end
+
+# Real basis U → real kernel (half memory)
+function MRISubspaceRecon.calculate_kernel_lowmem(img_shape, trj::CuArray{T,3}, U::CuArray{T};
+    sample_mask=CUDA.ones(Bool, size(trj)[2:end]), verbose=false) where {T <: Real}
+
+    img_shape_os = 2 .* img_shape
+    D = length(img_shape)
+    Nshift = 2^D
+
+    kmask_indcs_os, kmask_indcs_1x, map_1x_cpu, map_shift_cpu = _compute_lowmem_mask_gpu(img_shape, img_shape_os, trj; sample_mask)
+
+    n1x = length(kmask_indcs_1x)
+    Ncoeff = size(U, 2)
+    Npacked = Ncoeff * (Ncoeff + 1) ÷ 2
+
+    Λ_decomp = CUDA.zeros(T, Npacked, n1x, Nshift)
+
+    map_1x_gpu = CuArray(Int32.(map_1x_cpu))
+    map_shift_gpu = CuArray(Int32.(map_shift_cpu))
+    kmask_indcs_os_gpu = CuArray(kmask_indcs_os)
+
+    nsamp_t = cu(sum(sample_mask, dims=1))
+    @assert sum(nsamp_t) > 0 "Sample_mask removes all samples, cannot compute kernel."
+    cumsum_nsamp = CUDA.zeros(eltype(nsamp_t), size(nsamp_t))
+    cumsum_nsamp[2:end] = cumsum(nsamp_t[1:end-1])
+
+    λ  = CuArray{T}(undef, img_shape_os)
+    λ2 = CuArray{Complex{T}}(undef, img_shape_os[1] ÷ 2 + 1, Base.tail(img_shape_os)...)
+    S = CuArray{T}(undef, sum(nsamp_t))
+
+    brfftplan = plan_brfft(λ2, img_shape_os[1])
+    nfftplan = PlanNUFFT(T, img_shape_os; backend=CUDABackend(), gpu_method=:shared_memory, gpu_batch_size=Val(200))
+    set_points!(nfftplan, NonuniformFFTs._transform_point_convention.(trj[:, sample_mask]))
+
+    threads_multiply, blocks_multiply, _, _ = launch_config_kernel(nsamp_t, kmask_indcs_os_gpu)
+
+    n_os = length(kmask_indcs_os)
+    max_threads = attribute(device(), CUDA.DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK)
+    scatter_threads = min(max_threads, n_os)
+    scatter_blocks = cld(n_os, scatter_threads)
+
+    verbose && println("calculating decomposed non-Cartesian kernel (real, GPU)...")
+    t = @elapsed CUDA.@sync for ic2 ∈ 1:Ncoeff, ic1 ∈ 1:Ncoeff
+        if ic2 >= ic1
+            @cuda threads=threads_multiply blocks=blocks_multiply multiply_basis_vectors!(S, U, nsamp_t, cumsum_nsamp, ic1, ic2)
+
+            exec_type1!(λ2, nfftplan, vec(S))
+            λ2 .= conj.(λ2)
+            mul!(λ, brfftplan, λ2)
+
+            @cuda threads=scatter_threads blocks=scatter_blocks store_decomposed_kernel!(
+                Λ_decomp, λ, kmask_indcs_os_gpu, map_1x_gpu, map_shift_gpu, Int32(ic1), Int32(ic2))
+        end
+    end
+    verbose && println("time to compute kernel: t = $t s")
+
+    return Λ_decomp, CuArray(kmask_indcs_1x)
+end
+
+#############################################################################
+# Mask computation helper
+#############################################################################
+
+function _compute_lowmem_mask_gpu(img_shape, img_shape_os, trj::CuArray{T,3}; sample_mask) where {T}
+    D = length(img_shape)
+    kmask_indcs_os = calculate_kmask_indcs(img_shape_os, trj; sample_mask)
+    @assert all(kmask_indcs_os .> 0)
+    @assert all(kmask_indcs_os .<= prod(img_shape_os))
+
     ci_os_all = CartesianIndices(img_shape_os)
     li_1x_all = LinearIndices(img_shape)
 
-    # Find 1x grid positions and build mapping
     kmask_1x_set = Set{Int}()
-    for ki in kmask_os_cpu
+    for ki in kmask_indcs_os
         ci = ci_os_all[ki]
         ci_1x = CartesianIndex(ntuple(d -> (ci[d] - 1) >> 1 + 1, D))
         push!(kmask_1x_set, li_1x_all[ci_1x])
@@ -86,15 +198,11 @@ function decompose_kernel_gpu(img_shape, Λ_packed::CuArray, kmask_indcs_os, Nco
         pos_lookup[ki] = i
     end
 
-    # Build the mapping: for each OS index, what is the (1x_position, shift_index)?
-    n_os = length(kmask_os_cpu)
-    n_1x = length(kmask_indcs_1x)
-    # map_1x[ios] = position in kmask_indcs_1x
-    # map_shift[ios] = shift index (1-based)
-    map_1x = Vector{Int32}(undef, n_os)
-    map_shift = Vector{Int32}(undef, n_os)
+    n_os = length(kmask_indcs_os)
+    map_1x = Vector{Int}(undef, n_os)
+    map_shift = Vector{Int}(undef, n_os)
 
-    for (ios, ki_os) in enumerate(kmask_os_cpu)
+    for (ios, ki_os) in enumerate(kmask_indcs_os)
         ci = ci_os_all[ki_os]
         shift_bits = 0
         for d in 1:D
@@ -105,74 +213,23 @@ function decompose_kernel_gpu(img_shape, Λ_packed::CuArray, kmask_indcs_os, Nco
         map_shift[ios] = shift_bits + 1
     end
 
-    map_1x_gpu = CuArray(map_1x)
-    map_shift_gpu = CuArray(map_shift)
-
-    # Allocate output
-    Λ_decomp = CUDA.zeros(Complex{T}, Ncoeff, Ncoeff, n_1x, Nshift)
-
-    # Launch kernel to scatter and unpack
-    max_threads = attribute(device(), CUDA.DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK)
-    nthreads = min(max_threads, n_os)
-    nblocks = cld(n_os, nthreads)
-
-    if eltype(Λ_packed) <: Complex
-        @cuda threads=nthreads blocks=nblocks scatter_kernel_complex!(
-            Λ_decomp, Λ_packed, map_1x_gpu, map_shift_gpu, Int32(Ncoeff))
-    else
-        @cuda threads=nthreads blocks=nblocks scatter_kernel_real!(
-            Λ_decomp, Λ_packed, map_1x_gpu, map_shift_gpu, Int32(Ncoeff))
-    end
-
-    return Λ_decomp, CuArray(kmask_indcs_1x)
+    return kmask_indcs_os, kmask_indcs_1x, map_1x, map_shift
 end
 
-# CUDA kernel: scatter packed complex OS kernel entries into decomposed 4D array
-function scatter_kernel_complex!(Λ_decomp, Λ_packed, map_1x, map_shift, Ncoeff::Int32)
+#############################################################################
+# CUDA scatter kernel — store into packed upper triangular
+#############################################################################
+
+function store_decomposed_kernel!(Λ_decomp, λ, kmask_indcs_os, map_1x, map_shift, ic1::Int32, ic2::Int32)
     ios = (blockIdx().x - 1) * blockDim().x + threadIdx().x
-    if ios > length(map_1x)
+    if ios > length(kmask_indcs_os)
         return
     end
 
     i_1x = map_1x[ios]
     s = map_shift[ios]
-
-    @inbounds for ic2 in Int32(1):Ncoeff
-        for ic1 in Int32(1):Ncoeff
-            if ic1 <= ic2
-                ind_packed = ic1 + ic2 * (ic2 - Int32(1)) ÷ Int32(2)
-                Λ_decomp[ic1, ic2, i_1x, s] = Λ_packed[ind_packed, ios]
-            else
-                ind_packed = ic2 + ic1 * (ic1 - Int32(1)) ÷ Int32(2)
-                Λ_decomp[ic1, ic2, i_1x, s] = conj(Λ_packed[ind_packed, ios])
-            end
-        end
-    end
-    return
-end
-
-# CUDA kernel: scatter packed real OS kernel entries into decomposed 4D array
-# Real packed kernel is symmetric, so Λ[ic1,ic2] == Λ[ic2,ic1]
-function scatter_kernel_real!(Λ_decomp, Λ_packed, map_1x, map_shift, Ncoeff::Int32)
-    ios = (blockIdx().x - 1) * blockDim().x + threadIdx().x
-    if ios > length(map_1x)
-        return
-    end
-
-    i_1x = map_1x[ios]
-    s = map_shift[ios]
-
-    @inbounds for ic2 in Int32(1):Ncoeff
-        for ic1 in Int32(1):Ncoeff
-            if ic1 <= ic2
-                ind_packed = ic1 + ic2 * (ic2 - Int32(1)) ÷ Int32(2)
-            else
-                ind_packed = ic2 + ic1 * (ic1 - Int32(1)) ÷ Int32(2)
-            end
-            val = Λ_packed[ind_packed, ios]
-            Λ_decomp[ic1, ic2, i_1x, s] = val
-        end
-    end
+    ind_packed = ic1 + ic2 * (ic2 - Int32(1)) ÷ Int32(2)
+    @inbounds Λ_decomp[ind_packed, i_1x, s] = λ[kmask_indcs_os[ios]]
     return
 end
 
@@ -203,12 +260,12 @@ function LinearAlgebra.mul!(x::CuArray, S::MRISubspaceRecon._NFFTNormalOpLowmem,
             # 2) FFT on non-oversampled grid
             S.fftplan * S.kL1
 
-            # 3) Apply decomposed kernel
+            # 3) Apply packed kernel
             kL1_rs = reshape(S.kL1, :, S.Ncoeff)
             kL2_rs = reshape(S.kL2, :, S.Ncoeff)
             fill!(S.kL2, 0)
             @cuda threads=S.threads blocks=S.blocks kernel_mul_lowmem!(
-                kL2_rs, S.Λ_decomp, kL1_rs, S.kmask_indcs, Int32(s))
+                kL2_rs, S.Λ_decomp, kL1_rs, S.kmask_indcs, S.ind_lookup, Int32(s))
 
             # 4) IFFT on non-oversampled grid
             S.ifftplan * S.kL2
@@ -221,11 +278,11 @@ function LinearAlgebra.mul!(x::CuArray, S::MRISubspaceRecon._NFFTNormalOpLowmem,
 end
 
 #############################################################################
-# CUDA kernel for decomposed kernel multiply
+# CUDA kernel for packed decomposed kernel multiply
 #############################################################################
 
-# Full matrix multiply at each masked k-space position for a given shift
-function kernel_mul_lowmem!(kL2_rs, Λ_decomp, kL1_rs, kmask_indcs, s::Int32)
+# Complex kernel: Hermitian unpacking
+function kernel_mul_lowmem!(kL2_rs, Λ_decomp::CuDeviceArray{Tc,3}, kL1_rs, kmask_indcs, ind_lookup, s::Int32) where {Tc <: Complex}
     ik  = (blockIdx().x - 1) * blockDim().x + threadIdx().x
     ic1 = (blockIdx().y - 1) * blockDim().y + threadIdx().y
 
@@ -233,8 +290,33 @@ function kernel_mul_lowmem!(kL2_rs, Λ_decomp, kL1_rs, kmask_indcs, s::Int32)
         ind = kmask_indcs[ik]
         acc = zero(eltype(kL2_rs))
 
-        @inbounds for ic2 in 1:size(Λ_decomp, 2)
-            acc += Λ_decomp[ic1, ic2, ik, s] * kL1_rs[ind, ic2]
+        @inbounds for ic2 in 1:size(ind_lookup, 2)
+            if ic1 <= ic2
+                ip = ind_lookup[ic1, ic2]
+                acc += Λ_decomp[ip, ik, s] * kL1_rs[ind, ic2]
+            else
+                ip = ind_lookup[ic2, ic1]
+                acc += conj(Λ_decomp[ip, ik, s]) * kL1_rs[ind, ic2]
+            end
+        end
+
+        kL2_rs[ind, ic1] = acc
+    end
+    return
+end
+
+# Real kernel: symmetric unpacking
+function kernel_mul_lowmem!(kL2_rs, Λ_decomp::CuDeviceArray{T,3}, kL1_rs, kmask_indcs, ind_lookup, s::Int32) where {T <: Real}
+    ik  = (blockIdx().x - 1) * blockDim().x + threadIdx().x
+    ic1 = (blockIdx().y - 1) * blockDim().y + threadIdx().y
+
+    if ik <= length(kmask_indcs) && ic1 <= size(kL2_rs, 2)
+        ind = kmask_indcs[ik]
+        acc = zero(eltype(kL2_rs))
+
+        @inbounds for ic2 in 1:size(ind_lookup, 2)
+            ip = ind_lookup[ic1, ic2]
+            acc += Λ_decomp[ip, ik, s] * kL1_rs[ind, ic2]
         end
 
         kL2_rs[ind, ic1] = acc

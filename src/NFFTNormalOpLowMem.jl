@@ -1,36 +1,40 @@
 ## ##########################################################################
 # NFFTNormalOpLowMem - Decomposed Toeplitz trick for reduced memory usage
+#
+# Memory layout: Λ_decomp has shape (Ncoeff*(Ncoeff+1)÷2, n_kmask_1x, 2^D)
+#   - First axis: packed upper-triangular storage (same as standard operator)
+#   - Second axis: non-zero k-space positions on the 1× grid
+#   - Third axis: shift index (even/odd frequency sub-grids)
+#
+# The kernel is real when U is real, complex when U is complex.
 #############################################################################
 
 """
     NFFTNormalOpLowmem(img_shape, Λ_decomp, kmask_indcs; cmaps, num_fft_threads)
 
 Low-memory Toeplitz normal operator. Buffers `kL1`, `kL2` are allocated on the
-non-oversampled grid `img_shape` (2^D times smaller than the standard operator).
-The decomposed kernel `Λ_decomp` has shape `(Ncoeff, Ncoeff, n_kmask_1x, 2^D)`.
+non-oversampled grid (2^D times smaller than the standard operator).
 
-Instead of performing a single FFT on a 2×-oversampled grid, this operator
-performs 2^D FFTs on the original grid with different linear phase shifts.
-The result is mathematically equivalent but uses 2^D less buffer memory.
-
-# References
-- Uecker M, et al. "BART toolbox" — lowmem/decomp mode in src/noncart/nufft.c
+The decomposed kernel `Λ_decomp` has shape `(Ncoeff*(Ncoeff+1)÷2, n_kmask_1x, 2^D)`
+using packed upper-triangular storage.
 """
 function NFFTNormalOpLowmem(
     img_shape,
-    Λ_decomp::AbstractArray{Tc,4},
+    Λ_decomp::AbstractArray{Tc,3},
     kmask_indcs::Vector{<:Integer};
     cmaps=(1,),
-    num_fft_threads=round(Int, Threads.nthreads()/size(Λ_decomp, 1))
+    num_fft_threads=1
     ) where {T, Tc <: Union{T, Complex{T}}}
 
-    Ncoeff = size(Λ_decomp, 1)
     D = length(img_shape)
     Nshift = 2^D
-    @assert size(Λ_decomp, 4) == Nshift
-    @assert length(kmask_indcs) == size(Λ_decomp, 3)
+    @assert size(Λ_decomp, 3) == Nshift
+    @assert length(kmask_indcs) == size(Λ_decomp, 2)
     @assert all(kmask_indcs .> 0)
     @assert all(kmask_indcs .<= prod(img_shape))
+
+    # Derive Ncoeff from packed size
+    Ncoeff = (isqrt(8 * size(Λ_decomp, 1) + 1) - 1) ÷ 2
 
     kL1 = Array{Complex{T}}(undef, img_shape..., Ncoeff)
     kL2 = similar(kL1)
@@ -41,7 +45,9 @@ function NFFTNormalOpLowmem(
 
     phases = _compute_linphases(img_shape, T)
 
-    A = _NFFTNormalOpLowmem(img_shape, Ncoeff, fftplan, ifftplan, Λ_decomp, kmask_indcs, kL1, kL2, cmaps, phases, nothing, nothing)
+    ind_lookup = [j<=k ? j+k*(k-1)÷2 : k+j*(j-1)÷2 for j ∈ 1:Ncoeff, k ∈ 1:Ncoeff]
+
+    A = _NFFTNormalOpLowmem(img_shape, Ncoeff, fftplan, ifftplan, Λ_decomp, kmask_indcs, kL1, kL2, cmaps, phases, ind_lookup, nothing, nothing)
 
     return LinearOperator(
         Complex{T},
@@ -57,55 +63,38 @@ end
 #############################################################################
 # Internal struct
 #############################################################################
-struct _NFFTNormalOpLowmem{S,E,F,G,H,I,J,K,P,M,N}
+struct _NFFTNormalOpLowmem{S,E,F,G,H,I,J,K,P,L,M,N}
     shape::S
     Ncoeff::Int
     fftplan::E
     ifftplan::F
-    Λ_decomp::G    # (Ncoeff, Ncoeff, n_kmask_1x, 2^D)
+    Λ_decomp::G    # (Ncoeff*(Ncoeff+1)÷2, n_kmask_1x, 2^D) packed upper triangular
     kmask_indcs::H  # indices into the 1x grid
     kL1::I
     kL2::J
     cmaps::K
     phases::P       # (img_shape..., 2^D)
+    ind_lookup::L   # (Ncoeff, Ncoeff) packed index lookup
     threads::M      # GPU thread config (nothing on CPU)
     blocks::N       # GPU block config (nothing on CPU)
 end
 
 #############################################################################
-# Kernel decomposition
+# Direct kernel computation into decomposed packed shape
 #############################################################################
 
-"""
-    decompose_kernel(img_shape, Λ_os, kmask_indcs_os) -> (Λ_decomp, kmask_indcs_1x)
-
-Decompose a Toeplitz kernel from the 2×-oversampled grid into 2^D sub-kernels
-on the non-oversampled grid.
-
-The 2× grid is split by interleaving even/odd indices in each dimension:
-each position `p` on the 2× grid maps to `(p ÷ 2, p % 2)`, giving a 1× grid
-position and a shift bit.  The resulting `2^D` sub-kernels are applied
-independently, each paired with an FFT on the 1× grid and a linear phase ramp
-corresponding to the shift.
-"""
-function decompose_kernel(img_shape, Λ_os::AbstractArray{Tc,3}, kmask_indcs_os::Vector{<:Integer}) where {Tc}
-    img_shape_os = 2 .* img_shape
+# Compute the 1x kmask and the mapping from 2x mask to (1x position, shift)
+function _compute_lowmem_mask(img_shape, img_shape_os, trj; sample_mask)
     D = length(img_shape)
-    Nshift = 2^D
-    Ncoeff = size(Λ_os, 1)
+    kmask_indcs_os = calculate_kmask_indcs(img_shape_os, trj; sample_mask)
+    @assert all(kmask_indcs_os .> 0)
+    @assert all(kmask_indcs_os .<= prod(img_shape_os))
 
-    # The existing kernel Λ_os lives on the 2× oversampled grid in the
-    # Fourier domain.  BART's `compute_psf2` computes the PSF on the 2× grid,
-    # applies `fftuc` (centered FFT), then uses `md_decompose` to split
-    # even/odd indices: psf_decomp[k, s] = psf_2x[2k + bit(s)].
-    #
-    # Our Λ_os is already in the Fourier domain (it's the kernel that gets
-    # multiplied pointwise after FFT).
-    
-    # 1) Find union of 1x grid positions touched by any OS index
-    kmask_1x_set = Set{Int}()
     ci_os_all = CartesianIndices(img_shape_os)
     li_1x_all = LinearIndices(img_shape)
+
+    # Find 1x positions
+    kmask_1x_set = Set{Int}()
     for ki in kmask_indcs_os
         ci = ci_os_all[ki]
         ci_1x = CartesianIndex(ntuple(d -> (ci[d] - 1) >> 1 + 1, D))
@@ -113,15 +102,15 @@ function decompose_kernel(img_shape, Λ_os::AbstractArray{Tc,3}, kmask_indcs_os:
     end
     kmask_indcs_1x = sort!(collect(kmask_1x_set))
 
-    # Reverse map: 1x linear index -> position in kmask_indcs_1x
     pos_lookup = Dict{Int,Int}()
     for (i, ki) in enumerate(kmask_indcs_1x)
         pos_lookup[ki] = i
     end
 
-    # 2) Scatter OS entries into sub-grid bins (pure interleave, no transform)
-    n1x = length(kmask_indcs_1x)
-    Λ_decomp = zeros(Tc, Ncoeff, Ncoeff, n1x, Nshift)
+    # Build per-os-entry mapping: (1x_index_in_mask, shift_index)
+    n_os = length(kmask_indcs_os)
+    map_1x = Vector{Int}(undef, n_os)
+    map_shift = Vector{Int}(undef, n_os)
 
     for (ios, ki_os) in enumerate(kmask_indcs_os)
         ci = ci_os_all[ki_os]
@@ -130,11 +119,107 @@ function decompose_kernel(img_shape, Λ_os::AbstractArray{Tc,3}, kmask_indcs_os:
             shift_bits |= ((ci[d] - 1) & 1) << (d - 1)
         end
         ci_1x = CartesianIndex(ntuple(d -> (ci[d] - 1) >> 1 + 1, D))
-        i_1x = pos_lookup[li_1x_all[ci_1x]]
-        s = shift_bits + 1
-        @views Λ_decomp[:, :, i_1x, s] .= Λ_os[:, :, ios]
+        map_1x[ios] = pos_lookup[li_1x_all[ci_1x]]
+        map_shift[ios] = shift_bits + 1
     end
 
+    return kmask_indcs_os, kmask_indcs_1x, map_1x, map_shift
+end
+
+# Complex basis U → complex kernel (packed upper triangular)
+function calculate_kernel_lowmem(img_shape, trj::AbstractArray{T,3}, U::AbstractArray{Tc}; sample_mask=trues(size(trj)[2:end]), verbose=false) where {T, Tc <: Complex{T}}
+    img_shape_os = 2 .* img_shape
+    D = length(img_shape)
+    Nshift = 2^D
+
+    kmask_indcs_os, kmask_indcs_1x, map_1x, map_shift = _compute_lowmem_mask(img_shape, img_shape_os, trj; sample_mask)
+
+    nsamp_t = vec(sum(sample_mask; dims=1))
+    @assert sum(nsamp_t) > 0 "Mask removes all samples, cannot compute kernel."
+    cumsum_nsamp = cumsum(nsamp_t) .+ 1
+    prepend!(cumsum_nsamp, 1)
+
+    λ  = Array{Complex{T}}(undef, img_shape_os)
+    λ2 = similar(λ)
+
+    Ncoeff = size(U, 2)
+    Npacked = Ncoeff * (Ncoeff + 1) ÷ 2
+    n1x = length(kmask_indcs_1x)
+    Λ_decomp = zeros(Complex{T}, Npacked, n1x, Nshift)
+    S = Vector{Complex{T}}(undef, sum(nsamp_t))
+
+    fftplan  = plan_fft(λ; flags=FFTW.MEASURE, num_threads=Threads.nthreads())
+    nfftplan = PlanNUFFT(Complex{T}, img_shape_os)
+    set_points!(nfftplan, NonuniformFFTs._transform_point_convention.(trj[:, sample_mask]))
+
+    verbose && println("calculating decomposed non-Cartesian kernel (complex)...")
+    t = @elapsed for ic2 ∈ 1:Ncoeff, ic1 ∈ 1:Ncoeff
+        if ic2 >= ic1
+            @simd for it ∈ axes(U, 1)
+                idx1 = cumsum_nsamp[it]
+                idx2 = cumsum_nsamp[it + 1] - 1
+                @inbounds S[idx1:idx2] .= conj(U[it, ic1]) * U[it, ic2]
+            end
+
+            NonuniformFFTs.exec_type1!(λ2, nfftplan, vec(S))
+            mul!(λ, fftplan, λ2)
+
+            ind_packed = ic1 + ic2 * (ic2 - 1) ÷ 2
+            Threads.@threads for ios ∈ eachindex(kmask_indcs_os)
+                @inbounds Λ_decomp[ind_packed, map_1x[ios], map_shift[ios]] = λ[kmask_indcs_os[ios]]
+            end
+        end
+    end
+    verbose && println("time to compute kernel: t = $t s")
+    return Λ_decomp, kmask_indcs_1x
+end
+
+# Real basis U → real kernel (packed upper triangular, half memory)
+function calculate_kernel_lowmem(img_shape, trj::AbstractArray, U::AbstractArray{T}; sample_mask=trues(size(trj)[2:end]), verbose=false) where {T <: Real}
+    img_shape_os = 2 .* img_shape
+    D = length(img_shape)
+    Nshift = 2^D
+
+    kmask_indcs_os, kmask_indcs_1x, map_1x, map_shift = _compute_lowmem_mask(img_shape, img_shape_os, trj; sample_mask)
+
+    nsamp_t = vec(sum(sample_mask; dims=1))
+    @assert sum(nsamp_t) > 0 "Mask removes all samples, cannot compute kernel."
+    cumsum_nsamp = cumsum(nsamp_t) .+ 1
+    prepend!(cumsum_nsamp, 1)
+
+    λ  = Array{T}(undef, img_shape_os)
+    λ2 = Array{Complex{T}}(undef, img_shape_os[1] ÷ 2 + 1, Base.tail(img_shape_os)...)
+
+    Ncoeff = size(U, 2)
+    Npacked = Ncoeff * (Ncoeff + 1) ÷ 2
+    n1x = length(kmask_indcs_1x)
+    Λ_decomp = zeros(T, Npacked, n1x, Nshift)
+    S = Array{T}(undef, sum(nsamp_t))
+
+    brfftplan = plan_brfft(λ2, img_shape_os[1]; flags=FFTW.MEASURE, num_threads=Threads.nthreads())
+    nfftplan = PlanNUFFT(T, img_shape_os)
+    set_points!(nfftplan, NonuniformFFTs._transform_point_convention.(trj[:, sample_mask]))
+
+    verbose && println("calculating decomposed non-Cartesian kernel (real)...")
+    t = @elapsed for ic2 ∈ 1:Ncoeff, ic1 ∈ 1:Ncoeff
+        if ic2 >= ic1
+            @simd for it ∈ axes(U, 1)
+                idx1 = cumsum_nsamp[it]
+                idx2 = cumsum_nsamp[it + 1] - 1
+                @inbounds S[idx1:idx2] .= U[it, ic1] * U[it, ic2]
+            end
+
+            NonuniformFFTs.exec_type1!(λ2, nfftplan, vec(S))
+            λ2 .= conj.(λ2)
+            mul!(λ, brfftplan, λ2)
+
+            ind_packed = ic1 + ic2 * (ic2 - 1) ÷ 2
+            Threads.@threads for ios ∈ eachindex(kmask_indcs_os)
+                @inbounds Λ_decomp[ind_packed, map_1x[ios], map_shift[ios]] = λ[kmask_indcs_os[ios]]
+            end
+        end
+    end
+    verbose && println("time to compute kernel: t = $t s")
     return Λ_decomp, kmask_indcs_1x
 end
 
@@ -147,19 +232,11 @@ end
 
 Precompute linear phase ramps of size `(img_shape..., 2^D)`.
 
-The relationship between the 2×-oversampled FFT and the 1× FFT is:
+The 2×-oversampled FFT of a zero-padded signal satisfies:
     FFT_2N[2k + b] = FFT_N( x[n] · exp(-iπ·b·n/N) )[k]
 
-where `b ∈ {0,1}` for each dimension selects even/odd frequencies.
-For multi-dimensional shift index `s` (1-based), bit `d` of `(s-1)` selects
-whether dimension `d` uses the odd-frequency phase.
-
-The inverse relationship (crop of IFFT on 2× grid) gives a factor of `1/2^D`
-when summing over all shifts. We split this as `1/√2^D` per phase application
-(forward and adjoint).
-
-Phase at position `I` for shift `s`:
-    (1/√2^D) · exp(-iπ Σ_d b_d · (I[d]-1) / N[d])
+The factor `1/√(2^D)` per phase application (forward and adjoint) gives
+the `1/2^D` normalization from summing over all 2^D shifts.
 """
 function _compute_linphases(img_shape, ::Type{T}) where {T}
     D = length(img_shape)
@@ -177,7 +254,6 @@ function _compute_linphases(img_shape, ::Type{T}) where {T}
                     θ += Tr(I[d] - 1) / Tr(img_shape[d])
                 end
             end
-            # exp(-iπ * θ) = cispi(-θ)
             phases[I, s] = scale * cispi(Tr(-1) * θ)
         end
     end
@@ -185,18 +261,9 @@ function _compute_linphases(img_shape, ::Type{T}) where {T}
 end
 
 #############################################################################
-# mul! implementation
+# mul! implementation (CPU)
 #############################################################################
 
-"""
-Low-memory `mul!` using the decomposed Toeplitz trick.
-For each shift `s ∈ 1:2^D`:
-  1. Multiply input by `phase_s` and coil map
-  2. FFT on the non-oversampled grid
-  3. Apply `Λ_decomp[:,:,:,s]` at masked k-space positions
-  4. IFFT on the non-oversampled grid
-  5. Multiply by `conj(phase_s)` and `conj(cmap)`, accumulate into output
-"""
 function LinearAlgebra.mul!(x::AbstractVector{T}, S::_NFFTNormalOpLowmem, b, α, β) where {T}
     idx = CartesianIndices(S.shape)
     D = length(S.shape)
@@ -227,14 +294,26 @@ function LinearAlgebra.mul!(x::AbstractVector{T}, S::_NFFTNormalOpLowmem, b, α,
                     @views S.fftplan * S.kL1[idx, i]
                 end
 
-                # 3) Apply decomposed kernel at masked positions
+                # 3) Apply packed kernel at masked positions
                 kL1_rs = reshape(S.kL1, :, S.Ncoeff)
                 kL2_rs = reshape(S.kL2, :, S.Ncoeff)
                 Threads.@threads for i in eachindex(kL2_rs)
                     kL2_rs[i] = 0
                 end
-                @tasks for i in axes(S.Λ_decomp, 3)
-                    @views @inbounds mul!(kL2_rs[S.kmask_indcs[i], :], S.Λ_decomp[:, :, i, s], kL1_rs[S.kmask_indcs[i], :])
+                @tasks for ik in axes(S.Λ_decomp, 2)
+                    kind = S.kmask_indcs[ik]
+                    @inbounds for ic1 in 1:S.Ncoeff
+                        acc = zero(Complex{real(T)})
+                        for ic2 in 1:S.Ncoeff
+                            ip = S.ind_lookup[ic1, ic2]
+                            if ic1 <= ic2
+                                acc += S.Λ_decomp[ip, ik, s] * kL1_rs[kind, ic2]
+                            else
+                                acc += conj(S.Λ_decomp[ip, ik, s]) * kL1_rs[kind, ic2]
+                            end
+                        end
+                        kL2_rs[kind, ic1] = acc
+                    end
                 end
 
                 # 4) IFFT on non-oversampled grid

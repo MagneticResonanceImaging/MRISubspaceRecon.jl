@@ -8,13 +8,11 @@ function MRISubspaceRecon.NFFTNormalOp(
     lowmem=false,
     ) where {T <: Real, Tc <: Union{T, Complex{T}}}
 
-    Λ, kmask_indcs = calculate_kernel_noncartesian(2 .* img_shape, trj, U; sample_mask, verbose)
-
     if lowmem
-        Ncoeff = (isqrt(8 * size(Λ, 1) + 1) - 1) ÷ 2
-        Λ_d, kmask_d = decompose_kernel_gpu(img_shape, Λ, kmask_indcs, Ncoeff)
+        Λ_d, kmask_d = MRISubspaceRecon.calculate_kernel_lowmem(img_shape, trj, U; sample_mask, verbose)
         return MRISubspaceRecon.NFFTNormalOpLowmem(img_shape, Λ_d, kmask_d; cmaps)
     else
+        Λ, kmask_indcs = calculate_kernel_noncartesian(2 .* img_shape, trj, U; sample_mask, verbose)
         return MRISubspaceRecon.NFFTNormalOp(img_shape, Λ, kmask_indcs; cmaps=cmaps)
     end
 end

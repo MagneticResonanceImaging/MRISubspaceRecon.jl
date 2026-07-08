@@ -68,7 +68,7 @@ b_test = randn(Complex{T}, prod(img_shape) * Nc)
 res_std    = A_std  * b_test
 res_lowmem = A_lowmem * b_test
 
-@test res_lowmem ≈ res_std rtol = 1e-4
+@test res_lowmem ≈ res_std rtol = 1e-5
 
 ## =========================================================================
 ## Test 2: CG reconstruction gives the same result
@@ -94,7 +94,7 @@ b = calculate_backprojection(data, trj, cmaps; U)
 xr_std    = cg(A_std, vec(b), maxiter=20)
 xr_lowmem = cg(A_lowmem, vec(b), maxiter=20)
 
-@test xr_lowmem ≈ xr_std rtol = 1e-3
+@test xr_lowmem ≈ xr_std rtol = 1e-4
 
 ## =========================================================================
 ## Test 3: Real-valued basis (triggers real kernel path)
@@ -108,7 +108,7 @@ A_lowmem_r = NFFTNormalOp(img_shape, trj, U_real; cmaps, lowmem=true)
 res_std_r    = A_std_r  * b_test
 res_lowmem_r = A_lowmem_r * b_test
 
-@test res_lowmem_r ≈ res_std_r rtol = 1e-4
+@test res_lowmem_r ≈ res_std_r rtol = 1e-5
 
 ## =========================================================================
 ## Test 4: Without coil maps (single-coil case)
@@ -119,4 +119,4 @@ A_lowmem_nc = NFFTNormalOp(img_shape, trj, U; lowmem=true)
 res_std_nc    = A_std_nc  * b_test
 res_lowmem_nc = A_lowmem_nc * b_test
 
-@test res_lowmem_nc ≈ res_std_nc rtol = 1e-4
+@test res_lowmem_nc ≈ res_std_nc rtol = 1e-5
