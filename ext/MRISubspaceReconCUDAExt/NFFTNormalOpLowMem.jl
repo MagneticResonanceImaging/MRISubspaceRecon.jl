@@ -178,7 +178,7 @@ end
 
 function _compute_lowmem_mask_gpu(img_shape, img_shape_os, trj::CuArray{T,3}; sample_mask) where {T}
     D = length(img_shape)
-    kmask_indcs_os = calculate_kmask_indcs(img_shape_os, trj; sample_mask)
+    kmask_indcs_os = Array(calculate_kmask_indcs(img_shape_os, trj; sample_mask))
     @assert all(kmask_indcs_os .> 0)
     @assert all(kmask_indcs_os .<= prod(img_shape_os))
 
