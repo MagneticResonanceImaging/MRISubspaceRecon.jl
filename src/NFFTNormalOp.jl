@@ -37,12 +37,11 @@ function NFFTNormalOp(
     lowmem=false,
     ) where {T <: Real, Tc <: Union{T, Complex{T}}}
 
-    Λ, kmask_indcs = calculate_kernel_noncartesian(2 .* img_shape, trj, U; sample_mask, verbose)
-
     if lowmem
-        Λ_d, kmask_d = decompose_kernel(img_shape, Λ, kmask_indcs)
+        Λ_d, kmask_d = calculate_kernel_lowmem(img_shape, trj, U; sample_mask, verbose)
         return NFFTNormalOpLowmem(img_shape, Λ_d, kmask_d; cmaps, num_fft_threads)
     else
+        Λ, kmask_indcs = calculate_kernel_noncartesian(2 .* img_shape, trj, U; sample_mask, verbose)
         return NFFTNormalOp(img_shape, Λ, kmask_indcs; cmaps=cmaps, num_fft_threads=num_fft_threads)
     end
 end
