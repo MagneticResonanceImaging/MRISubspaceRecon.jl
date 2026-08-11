@@ -41,10 +41,10 @@ Function to calculate a 3D radial kooshball trajectory with a golden-means angul
 - `Nr::Int`: Number of read out samples
 - `Ncyc::Int`: Number of cycles
 - `Nt::Int`: Number of time steps in the trajectory
-- `theta_rot::Float` = 0: Fixed rotation angle along theta
-- `phi_rot::Float` = 0: Fixed rotation angle along phi
-- `delay::Tuple{Float, Float, Float}`= `(0, 0, 0)`: Gradient delays in (HF, AP, LR)
-- `adc_dim::Bool` = `true`: Place ADC samples in a separate axis from each time frame for compatibility with wrapper functions.
+- `theta_rot::Real = 0`: Fixed polar rotation applied to all spokes.
+- `phi_rot::Real = 0`: Fixed azimuthal rotation applied to all spokes.
+- `delay::NTuple{3,<:Real} = (0, 0, 0)`: Gradient delays along (HF, AP, LR).
+- `adc_dim::Bool = true`: If `true`, place ADC samples on a separate axis for compatibility with wrapper functions.
 
 # References
 1. Chan RW, Ramsay EA, Cunningham CH, and Plewes DB. "Temporal stability of adaptive 3D radial MRI using multidimensional golden means". Magn. Reson. Med. 61 (2009) pp. 354-363. https://doi.org/10.1002/mrm.21837
@@ -70,11 +70,11 @@ The use of tiny golden angles [2] is supported by modifying `N`.
 - `Nr::Int`: Number of read out samples
 - `Ncyc::Int`: Number of cycles
 - `Nt::Int`: Number of time steps in the trajectory
-- `theta_rot::Float` = 0: Fixed rotation angle along theta
-- `phi_rot::Float` = 0: Fixed rotation angle along phi
-- `delay::Tuple{Float, Float, Float}` = `(0, 0, 0)`: Gradient delays in (HF, AP, LR)
-- `N::Int` = 1: Number of tiny golden angle
-- `adc_dim::Bool` = `true`: Place ADC samples in a separate axis from each time frame for compatibility with wrapper functions.
+- `theta_rot::Real = 0`: Fixed polar rotation applied to all spokes.
+- `phi_rot::Real = 0`: Fixed azimuthal rotation applied to all spokes.
+- `delay::NTuple{3,<:Real} = (0, 0, 0)`: Gradient delays along (HF, AP, LR).
+- `N::Int = 1`: Index of the tiny golden angle (`N=1` gives the standard golden angle).
+- `adc_dim::Bool = true`: If `true`, place ADC samples on a separate axis for compatibility with wrapper functions.
 
 # References
 1. Winkelmann S, Schaeffter T, Koehler T, Eggers H, Doessel O. "An optimal radial profile order based on the Golden Ratio for time-resolved MRI". IEEE TMI 26:68-76 (2007)
@@ -95,18 +95,27 @@ function traj_2d_radial_goldenratio(Nr, Ncyc, Nt; theta_rot=0, phi_rot=0, delay=
 end
 
 """
-    traj_kooshball(Nr, theta, phi; theta_rot, phi_rot, delay, adc_dim)
+    traj_kooshball(Nr, theta, phi; theta_rot=0, phi_rot=0, delay=(0, 0, 0), adc_dim=true)
 
-Function to calculate a 3D radial kooshball trajectory with custom sets of projection angles.
+Compute a 3D radial kooshball trajectory from user-supplied sets of projection angles.
+
+Each readout is a radial spoke through k-space center, oriented by the polar angle
+`theta` and the azimuthal angle `phi`. An optional fixed rotation (`theta_rot`, `phi_rot`)
+can be applied to every spoke, and per-axis gradient delays can be modeled via `delay`.
 
 # Arguments
-- `Nr::Int`: Number of read out samples
-- `theta::Array{Float,2}`: Array with dimensions: `Ncyc, Nt` defining the angles `theta` for each cycle and time step.
-- `phi::Array{Float,2}`: Array with dimensions: `Ncyc, Nt` defining the angles `phi` for each cycle and time step.
-- `theta_rot::Float` = 0: Fixed rotation angle along theta
-- `phi_rot::Float` = 0: Fixed rotation angle along phi
-- `delay::Tuple{Float, Float, Float}` = `(0, 0, 0)`: Gradient delays in (HF, AP, LR)
-- `adc_dim::Bool` = `true`: Place ADC samples in a separate axis from each time frame for compatibility with wrapper functions.
+- `Nr::Int`: Number of readout samples per spoke.
+- `theta::AbstractMatrix{<:Real}`: Polar angles with shape `(Ncyc, Nt)`, where `Ncyc` is the number of cycles (spokes per time frame) and `Nt` is the number of time frames.
+- `phi::AbstractMatrix{<:Real}`: Azimuthal angles with shape `(Ncyc, Nt)`. Must have the same size and element type as `theta`.
+
+# Keyword Arguments
+- `theta_rot::Real = 0`: Fixed polar rotation applied to all spokes.
+- `phi_rot::Real = 0`: Fixed azimuthal rotation applied to all spokes.
+- `delay::NTuple{3,<:Real} = (0, 0, 0)`: Gradient delays along (HF, AP, LR), expressed in units of the sample spacing.
+- `adc_dim::Bool = true`: If `true`, the ADC samples are placed on a separate axis, yielding an output of shape `(3, Nr, Ncyc, Nt)`. If `false`, the output has shape `(3, Nr * Ncyc, Nt)` for compatibility with downstream wrappers.
+
+# Returns
+- `k::Array{T,4}` or `Array{T,3}`: The k-space trajectory, with element type matching `eltype(theta)`. Values are clipped to `[-0.5, 0.5]` to remain within the range expected by `NFFT.jl`.
 """
 function traj_kooshball(Nr, theta, phi; theta_rot=0, phi_rot=0, delay=(0, 0, 0), adc_dim=true)
     @assert (eltype(theta) == eltype(phi)) "Mismatch between input types of `theta` and `phi`"
@@ -125,9 +134,9 @@ function traj_kooshball(Nr, theta, phi; theta_rot=0, phi_rot=0, delay=(0, 0, 0),
             ki = Array{eltype(theta),3}(undef, 3, Nr, Ncyc)
             Threads.@threads for ic ∈ 1:Ncyc
                 for ir ∈ 1:Nr
-                    ki[1, ir, ic] = -stheta[ic, it] * cphi[ic, it] * (kr[ir] + delay[1])
-                    ki[2, ir, ic] =  stheta[ic, it] * sphi[ic, it] * (kr[ir] + delay[2])
-                    ki[3, ir, ic] =  ctheta[ic, it]                * (kr[ir] + delay[3])
+                    ki[1, ir, ic] = stheta[ic, it] * cphi[ic, it] * (kr[ir] + delay[1])
+                    ki[2, ir, ic] = stheta[ic, it] * sphi[ic, it] * (kr[ir] + delay[2])
+                    ki[3, ir, ic] = ctheta[ic, it]                * (kr[ir] + delay[3])
                 end
             end
             k[:, :, it] = reshape(ki, 3, :)
@@ -139,14 +148,13 @@ function traj_kooshball(Nr, theta, phi; theta_rot=0, phi_rot=0, delay=(0, 0, 0),
         sphi_rot   = sin(phi_rot)
         cphi_rot   = cos(phi_rot)
 
-        k = Array{eltype(theta),3}(undef, 3, Nr * Ncyc, Nt)
         for it ∈ axes(k, 3)
             ki = Array{eltype(theta),3}(undef, 3, Nr, Ncyc)
             Threads.@threads for ic ∈ 1:Ncyc
                 for ir ∈ 1:Nr
-                    ki[1, ir, ic] = -(cphi_rot * cphi[ic, it] * ctheta_rot * stheta[ic, it] - sphi_rot *  sphi[ic, it] * stheta[ic, it] + cphi_rot * ctheta[ic, it] * stheta_rot)    * (kr[ir] + delay[1])
-                    ki[2, ir, ic] =  (cphi_rot * sphi[ic, it]             * stheta[ic, it] + sphi_rot * (cphi[ic, it] * ctheta_rot * stheta[ic, it] + ctheta[ic, it] * stheta_rot)) * (kr[ir] + delay[2])
-                    ki[3, ir, ic] =  (ctheta_rot * ctheta[ic, it] - stheta_rot * cphi[ic, it] * stheta[ic, it])                                                                   * (kr[ir] + delay[3])
+                    ki[1, ir, ic] = (cphi_rot * cphi[ic, it] * ctheta_rot * stheta[ic, it] - sphi_rot *  sphi[ic, it] * stheta[ic, it] + cphi_rot * ctheta[ic, it] * stheta_rot)    * (kr[ir] + delay[1])
+                    ki[2, ir, ic] = (cphi_rot * sphi[ic, it]             * stheta[ic, it] + sphi_rot * (cphi[ic, it] * ctheta_rot * stheta[ic, it] + ctheta[ic, it] * stheta_rot)) * (kr[ir] + delay[2])
+                    ki[3, ir, ic] = (ctheta_rot * ctheta[ic, it] - stheta_rot * cphi[ic, it] * stheta[ic, it])                                                                   * (kr[ir] + delay[3])
                 end
             end
             k[:, :, it] = reshape(ki, 3, :)
