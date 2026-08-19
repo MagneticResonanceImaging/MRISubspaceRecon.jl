@@ -1,5 +1,6 @@
-function MRISubspaceRecon.calculate_backprojection(data::CuArray{Tc,3}, trj::CuArray{T,3}, img_shape; U=cu(I(size(trj, 3))), sample_mask=CUDA.ones(Bool, size(trj)[2:end]), density_compensation=:none, verbose=false) where {T<:Real,Tc<:Complex{T}}
-    nsamp_t = vec(sum(sample_mask; dims=1)) # number of samples per time frame
+function MRISubspaceRecon.calculate_backprojection(data::AnyCuArray{Tc,3}, trj::AnyCuArray{T,3}, img_shape; U=cu(I(size(trj, 3))), sample_mask=CUDA.ones(Bool, size(trj)[2:end]), density_compensation=:none, verbose=false) where {T<:Real,Tc<:Complex{T}}
+    sample_idx = _sample_indices(sample_mask)
+    nsamp_t = _nsamples_per_frame(sample_mask, sample_idx) # number of samples per time frame
     Ncoef = size(U, 2)
     Ncoil = size(data, 3)
     Uc = conj(U)
@@ -9,12 +10,13 @@ function MRISubspaceRecon.calculate_backprojection(data::CuArray{Tc,3}, trj::CuA
     cumsum_nsamp[2:end] = cumsum(nsamp_t[1:end-1]) # cumulative sum indicates to which time frame a sample belongs
 
     p = PlanNUFFT(Complex{T}, img_shape; fftshift=true, backend=CUDABackend(), gpu_method=:shared_memory, gpu_batch_size=Val(200))
-    trj_rs = trj[:, sample_mask] # select subset of trj
+    trj_rs = _gather_points(trj, sample_idx) # select subset of trj (zero-copy if nothing is masked)
     set_points!(p, NonuniformFFTs._transform_point_convention.(trj_rs)) # transform matrix to tuples, change sign of FT exponent, change range to (0,2π)
 
     img_idx = CartesianIndices(img_shape)
     xbp = CUDA.zeros(Tc, img_shape..., Ncoef, Ncoil)
     data_temp = CuArray{Tc}(undef, sum(nsamp_t))
+    data_flat = _flatten_samples(data)
 
     # Configure threads and blocks for kernel within coefficient loop
     threads, blocks = launch_config_backprojection(nsamp_t)
@@ -23,7 +25,7 @@ function MRISubspaceRecon.calculate_backprojection(data::CuArray{Tc,3}, trj::CuA
     flush(stdout)
     t = @elapsed CUDA.@sync for icoil ∈ axes(data, 3)
         for icoef ∈ axes(U, 2)
-            copyto!(data_temp, @view data[sample_mask, icoil])
+            _gather_samples!(data_temp, data_flat, sample_idx, icoil)
             @cuda threads=threads blocks=blocks multiply_data_with_basis!(data_temp, Uc, nsamp_t, cumsum_nsamp, icoef)
             MRISubspaceRecon.apply_density_compensation!(data_temp, trj_rs; density_compensation)
             @views NonuniformFFTs.exec_type1!(xbp[img_idx, icoef, icoil], p, data_temp) # type 1: non-uniform points to uniform grid
@@ -34,8 +36,9 @@ function MRISubspaceRecon.calculate_backprojection(data::CuArray{Tc,3}, trj::CuA
     return xbp
 end
 
-function MRISubspaceRecon.calculate_backprojection(data::CuArray{Tc,3}, trj::CuArray{T,3}, cmaps::AbstractVector{<:CuArray{Tc,N}}; U=cu(I(size(trj, 3))), sample_mask=CUDA.ones(Bool, size(trj)[2:end]), density_compensation=:none, verbose=false) where {T<:Real,Tc<:Complex{T},N}
-    nsamp_t = vec(sum(sample_mask; dims=1)) # number of samples per time frame
+function MRISubspaceRecon.calculate_backprojection(data::AnyCuArray{Tc,3}, trj::AnyCuArray{T,3}, cmaps::AbstractVector{<:AnyCuArray{Tc,N}}; U=cu(I(size(trj, 3))), sample_mask=CUDA.ones(Bool, size(trj)[2:end]), density_compensation=:none, verbose=false) where {T<:Real,Tc<:Complex{T},N}
+    sample_idx = _sample_indices(sample_mask)
+    nsamp_t = _nsamples_per_frame(sample_mask, sample_idx) # number of samples per time frame
     Ncoef = size(U, 2)
     img_shape = size(cmaps[1])
     Uc = conj(U)
@@ -45,22 +48,23 @@ function MRISubspaceRecon.calculate_backprojection(data::CuArray{Tc,3}, trj::CuA
     cumsum_nsamp[2:end] = cumsum(nsamp_t[1:end-1]) # cumulative sum indicates to which time frame a sample belongs
 
     p = PlanNUFFT(Complex{T}, img_shape; fftshift=true, backend=CUDABackend(), gpu_method=:shared_memory, gpu_batch_size=Val(200))
-    trj_rs = trj[:, sample_mask]
+    trj_rs = _gather_points(trj, sample_idx)
     set_points!(p, NonuniformFFTs._transform_point_convention.(trj_rs))
 
     img_idx = CartesianIndices(img_shape)
     xbp = CUDA.zeros(Tc, img_shape..., Ncoef)
     xtmp = CuArray{Tc}(undef, img_shape)
     data_temp = CuArray{Tc}(undef, sum(nsamp_t))
+    data_flat = _flatten_samples(data)
 
     # Configure threads and blocks for kernel within coefficient loop
     threads, blocks = launch_config_backprojection(nsamp_t)
-    
+
     verbose && println("calculating backprojection...")
     flush(stdout)
     t = @elapsed CUDA.@sync for icoil ∈ eachindex(cmaps)
         for icoef ∈ axes(U, 2)
-            copyto!(data_temp, @view data[sample_mask, icoil])
+            _gather_samples!(data_temp, data_flat, sample_idx, icoil)
             @cuda threads=threads blocks=blocks multiply_data_with_basis!(data_temp, Uc, nsamp_t, cumsum_nsamp, icoef)
             MRISubspaceRecon.apply_density_compensation!(data_temp, trj_rs; density_compensation)
             NonuniformFFTs.exec_type1!(xtmp, p, data_temp) # type 1: non-uniform points to uniform grid
@@ -73,7 +77,7 @@ function MRISubspaceRecon.calculate_backprojection(data::CuArray{Tc,3}, trj::CuA
 end
 
 # Wrapper for use with 4D arrays, where nr of ADC samples per readout is in a separate at 2ⁿᵈ dim
-function MRISubspaceRecon.calculate_backprojection(data::CuArray{Tc,4}, trj::CuArray{T,4}, arg3; sample_mask=CUDA.ones(Bool, size(trj)[2:end]), kwargs...) where {T,Tc<:Complex}
+function MRISubspaceRecon.calculate_backprojection(data::AnyCuArray{Tc,4}, trj::AnyCuArray{T,4}, arg3; sample_mask=CUDA.ones(Bool, size(trj)[2:end]), kwargs...) where {T,Tc<:Complex}
     data = reshape(data, :, size(data, 3), size(data, 4))
     trj = reshape(trj, size(trj, 1), :, size(trj, 4))
     sample_mask = reshape(sample_mask, :, size(sample_mask, 3))

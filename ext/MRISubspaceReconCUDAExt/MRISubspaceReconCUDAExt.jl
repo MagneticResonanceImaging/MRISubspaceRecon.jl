@@ -10,6 +10,7 @@ using MRISubspaceRecon.NonuniformFFTs
 
 using CUDA
 
+include("MaskUtils.jl")
 include("NFFTNormalOp.jl")
 include("BackProjection.jl")
 include("CoilMaps.jl")

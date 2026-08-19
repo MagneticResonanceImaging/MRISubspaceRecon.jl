@@ -1,7 +1,7 @@
 function MRISubspaceRecon.NFFTNormalOp(
     img_shape,
-    trj::CuArray{T,3},
-    U::CuArray{Tc};
+    trj::AnyCuArray{T,3},
+    U::AnyCuArray{Tc};
     cmaps=(1,),
     sample_mask=CUDA.ones(Bool, size(trj)[2:end]),
     verbose=false
@@ -13,7 +13,7 @@ function MRISubspaceRecon.NFFTNormalOp(
 end
 
 # Wrapper for 4D data arrays
-function MRISubspaceRecon.NFFTNormalOp(img_shape, trj::CuArray{T,4}, U::CuArray{Tc}; sample_mask=CUDA.ones(Bool, size(trj)[2:end]), kwargs...) where {T, Tc <: Union{T, Complex{T}}}
+function MRISubspaceRecon.NFFTNormalOp(img_shape, trj::AnyCuArray{T,4}, U::AnyCuArray{Tc}; sample_mask=CUDA.ones(Bool, size(trj)[2:end]), kwargs...) where {T, Tc <: Union{T, Complex{T}}}
     trj = reshape(trj, size(trj,1), :, size(trj,4))
     sample_mask = reshape(sample_mask, :, size(sample_mask,3))
     return MRISubspaceRecon.NFFTNormalOp(img_shape, trj, U; kwargs..., sample_mask)
@@ -72,12 +72,17 @@ end
 ## ##########################################################################
 # Internal use
 #############################################################################
-function calculate_kmask_indcs(img_shape_os, trj::CuArray{T,3}; sample_mask=CUDA.ones(Bool, size(trj)[2:end])) where {T}
+function calculate_kmask_indcs(img_shape_os, trj::AnyCuArray{T,3}; sample_mask=CUDA.ones(Bool, size(trj)[2:end]), points=nothing) where {T}
     @assert all([i .== nextprod((2, 3, 5), i) for i ∈ img_shape_os]) "img_shape_os has to be composed of the prime factors 2, 3, and 5 (cf. NonuniformFFTs.jl documentation)."
 
     backend = CUDABackend()
     p = PlanNUFFT(Complex{T}, img_shape_os; σ=1, kernel=GaussianKernel(), backend=backend) # default is without fftshift
-    set_points!(p, NonuniformFFTs._transform_point_convention.(trj[:, sample_mask]))
+    # Reuse the caller's transformed points when available; recomputing them here
+    # would gather the masked trajectory a second time.
+    pts = isnothing(points) ?
+        NonuniformFFTs._transform_point_convention.(_gather_points(trj, _sample_indices(sample_mask))) :
+        points
+    set_points!(p, pts)
 
     S = CUDA.ones(Complex{T}, size(p.points[1]))
     NonuniformFFTs.spread_from_points!(p.backend, NUFFTCallbacks().nonuniform, p.point_transform_fold, p.blocks, p.kernels, p.kernel_evalmode, p.data.us, p.points, (S,))
@@ -85,14 +90,35 @@ function calculate_kmask_indcs(img_shape_os, trj::CuArray{T,3}; sample_mask=CUDA
     return kmask_indcs
 end
 
+"""
+    _kmask_and_plan(Tplan, img_shape_os, trj, sample_mask) -> (kmask_indcs, nfftplan)
+
+Derive the k-space mask indices and the NUFFT plan used by
+`calculate_kernel_noncartesian`, gathering and transforming the masked trajectory only *once* for both.
+
+This lives in its own function on purpose: the transformed points are a large temporary (`3 * Nsamples` floats), and a local variable stays GC-rooted for as long as its frame is alive. Returning from here is what makes the temporary collectable *before* the caller allocates the kernel arrays `Λ`, `λ` and `S`.
+"""
+function _kmask_and_plan(::Type{Tplan}, img_shape_os, trj::AnyCuArray{T,3}, sample_mask) where {Tplan, T}
+    pts = NonuniformFFTs._transform_point_convention.(_gather_points(trj, _sample_indices(sample_mask)))
+
+    kmask_indcs = calculate_kmask_indcs(img_shape_os, trj; sample_mask, points=pts)
+
+    # `Tplan == T` selects the plan specific to real inputs
+    nfftplan = PlanNUFFT(Tplan, img_shape_os; backend=CUDABackend(), gpu_method=:shared_memory, gpu_batch_size=Val(200))
+    set_points!(nfftplan, pts) # copies into plan-internal storage
+
+    return kmask_indcs, nfftplan
+end
+
 # Kernel is complex-valued (case of complex basis matrix U)
-function calculate_kernel_noncartesian(img_shape_os, trj::CuArray{T,3}, U::CuArray{Tc}; sample_mask=CUDA.ones(Bool, size(trj)[2:end]), verbose=false) where {T <: Real, Tc <: Complex{T}}
-    kmask_indcs = calculate_kmask_indcs(img_shape_os, trj; sample_mask)
+function calculate_kernel_noncartesian(img_shape_os, trj::AnyCuArray{T,3}, U::AnyCuArray{Tc}; sample_mask=CUDA.ones(Bool, size(trj)[2:end]), verbose=false) where {T <: Real, Tc <: Complex{T}}
+    # `kmask_indcs` and the NUFFT plan below both need the masked trajectory in the NonuniformFFTs point convention. Deriving it once inside a helper (a) halves the gather, and (b) lets the temporary be released when the helper returns.
+    kmask_indcs, nfftplan = _kmask_and_plan(Complex{T}, img_shape_os, trj, sample_mask)
 
     @assert all(kmask_indcs .> 0) # ensure that kmask is not out of bound
     @assert all(kmask_indcs .<= prod(img_shape_os))
 
-    nsamp_t = cu(sum(sample_mask, dims=1)) # number of samples per time frame
+    nsamp_t = _nsamples_per_frame(sample_mask, _sample_indices(sample_mask)) # number of samples per time frame
     cumsum_nsamp = CUDA.zeros(eltype(nsamp_t), size(nsamp_t)) # the cumulative sum indicates in which time frame each sample is contained
     cumsum_nsamp[2:end] = cumsum(nsamp_t[1:end-1])
 
@@ -104,10 +130,8 @@ function calculate_kernel_noncartesian(img_shape_os, trj::CuArray{T,3}, U::CuArr
     Λ = CuArray{Complex{T}}(undef, Int(Ncoeff*(Ncoeff+1)/2), length(kmask_indcs)) # allow complex U
     S = CuArray{Complex{T}}(undef, sum(nsamp_t))
 
-    # Prep FFT and NUFFT plans
+    # Prep FFT plan
     fftplan  = plan_fft(λ)
-    nfftplan = PlanNUFFT(Complex{T}, img_shape_os; backend=CUDABackend(), gpu_method=:shared_memory, gpu_batch_size = Val(200)) # use plan specific to real inputs
-    set_points!(nfftplan, NonuniformFFTs._transform_point_convention.(trj[:, sample_mask]))
 
    # Configure threads and blocks for each kernel within the coefficient loop
     threads_multiply, blocks_multiply, threads_store, blocks_store = launch_config_kernel(nsamp_t, kmask_indcs)
@@ -128,12 +152,13 @@ function calculate_kernel_noncartesian(img_shape_os, trj::CuArray{T,3}, U::CuArr
 end
 
 # Kernel is assumed to be real-valued to reduce storage by half (method only works with real basis U)
-function calculate_kernel_noncartesian(img_shape_os, trj::CuArray{T,3}, U::CuArray{T}; sample_mask=CUDA.ones(Bool, size(trj)[2:end]), verbose=false) where {T <: Real}
-    kmask_indcs = calculate_kmask_indcs(img_shape_os, trj; sample_mask)
+function calculate_kernel_noncartesian(img_shape_os, trj::AnyCuArray{T,3}, U::AnyCuArray{T}; sample_mask=CUDA.ones(Bool, size(trj)[2:end]), verbose=false) where {T <: Real}
+    # See the complex-U method above for why the points are derived in a helper.
+    kmask_indcs, nfftplan = _kmask_and_plan(T, img_shape_os, trj, sample_mask)
     @assert all(kmask_indcs .> 0) # ensure that kmask is not out of bound
     @assert all(kmask_indcs .<= prod(img_shape_os))
 
-    nsamp_t = cu(sum(sample_mask, dims=1)) # number of samples per time frame
+    nsamp_t = _nsamples_per_frame(sample_mask, _sample_indices(sample_mask)) # number of samples per time frame
     @assert sum(nsamp_t) > 0 "Sample_mask removes all samples, cannot compute kernel."
 
     cumsum_nsamp = CUDA.zeros(eltype(nsamp_t), size(nsamp_t))
@@ -147,11 +172,9 @@ function calculate_kernel_noncartesian(img_shape_os, trj::CuArray{T,3}, U::CuArr
     Λ = CuArray{T}(undef, Int(Ncoeff*(Ncoeff+1)/2), length(kmask_indcs)) # requires basis U to be real
     S = CuArray{T}(undef, sum(nsamp_t))
 
-    # Prep FFT and NUFFT plans
+    # Prep FFT plan
     # Use brfft (and conjugate λ2 in loop below) because a forward rfft with complex input does not exist in FFTW package
     brfftplan = plan_brfft(λ2, img_shape_os[1])
-    nfftplan = PlanNUFFT(T, img_shape_os; backend=CUDABackend(), gpu_method=:shared_memory, gpu_batch_size = Val(200)) # use plan specific to real inputs
-    set_points!(nfftplan, NonuniformFFTs._transform_point_convention.(trj[:, sample_mask]))
 
     # Configure threads and blocks for each kernel within the coefficient loop
     threads_multiply, blocks_multiply, threads_store, blocks_store = launch_config_kernel(nsamp_t, kmask_indcs)
@@ -240,11 +263,14 @@ function kernel_mul!(kL2_rs, Λ::CuDeviceMatrix{Tc}, kL1_rs, kmask_indcs, ind_lo
         acc = zero(eltype(kL2_rs))
 
         @inbounds for ic2 ∈ axes(ind_lookup, 2)
-            if k >= j
-                ind_packed = ind_lookup[ic1, ic2]
+            # Λ is stored packed for the upper triangle only; the full kernel
+            # matrix is Hermitian, so the lower triangle is the conjugate.
+            # `ind_lookup` is symmetric and already maps (ic1,ic2) to the packed
+            # index of the corresponding upper-triangular entry.
+            ind_packed = ind_lookup[ic1, ic2]
+            if ic2 >= ic1
                 acc += Λ[ind_packed, ik] * kL1_rs[ind, ic2]
             else
-                ind_packed = ind_lookup[ic2, ic1]
                 acc += conj(Λ[ind_packed, ik]) * kL1_rs[ind, ic2]
             end
         end
