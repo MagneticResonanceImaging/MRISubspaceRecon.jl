@@ -1,6 +1,6 @@
 function MRISubspaceRecon.calculate_coil_maps(
-    data::CuArray{Complex{T}},
-    trj::CuArray{T},
+    data::AnyCuArray{Complex{T}},
+    trj::AnyCuArray{T},
     img_shape::NTuple{N,Int};
     U=CUDA.ones(T, size(trj)[end]),
     sample_mask=CUDA.ones(Bool, size(trj)[2:end]),
@@ -36,8 +36,8 @@ end
 
 # wrapper for 4D data arrays with readout lines in separate axis
 function MRISubspaceRecon.calculate_coil_maps(
-    data::CuArray{Tc,4},
-    trj::CuArray{T,4},
+    data::AnyCuArray{Tc,4},
+    trj::AnyCuArray{T,4},
     img_shape::NTuple{N,Int};
     sample_mask=CUDA.ones(Bool, size(trj)[2:end]),
     kwargs...) where {N,T,Tc<:Complex}
@@ -117,8 +117,8 @@ function MRISubspaceRecon.reconstruct_coilwise(
 end
 
 function MRISubspaceRecon.reconstruct_coilwise(
-    data::CuArray{Tc,3},
-    trj::CuArray{T,3},
+    data::AnyCuArray{Tc,3},
+    trj::AnyCuArray{T,3},
     img_shape;
     U=CUDA.ones(T, size(trj)[end]),
     sample_mask=CUDA.ones(Bool, size(trj)[2:end]),

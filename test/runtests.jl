@@ -23,3 +23,23 @@ end
 @testset "Wrapper" begin
     include("wrapper.jl")
 end
+
+# GPU tests are run whenever a functional GPU is available; skip cleanly otherwise.
+gpu_available = try
+    using CUDA
+    CUDA.functional()
+catch err
+    @info "Skipping GPU tests: CUDA is unavailable ($(sprint(showerror, err) |> x -> first(x, 120)))"
+    false
+end
+
+if gpu_available
+    @testset "GPU" begin
+        include("reconstruct_radial_gpu.jl")
+        include("reconstruct_radial_gpu_real.jl")
+        include("reconstruct_cart_trj_gpu.jl")
+        include("wrapper_gpu.jl")
+    end
+else
+    @info "Skipping GPU tests: no functional CUDA device."
+end
