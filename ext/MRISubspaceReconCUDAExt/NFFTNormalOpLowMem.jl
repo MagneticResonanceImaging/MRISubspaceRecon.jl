@@ -59,14 +59,20 @@ end
 #############################################################################
 
 # Complex basis U → complex kernel
-function MRISubspaceRecon.calculate_kernel_lowmem(img_shape, trj::CuArray{T,3}, U::CuArray{Tc};
+function MRISubspaceRecon.calculate_kernel_lowmem(img_shape, trj::AnyCuArray{T,3}, U::AnyCuArray{Tc};
     sample_mask=CUDA.ones(Bool, size(trj)[2:end]), verbose=false) where {T <: Real, Tc <: Complex{T}}
 
     img_shape_os = 2 .* img_shape
     D = length(img_shape)
     Nshift = 2^D
 
-    kmask_indcs_os, kmask_indcs_1x, map_1x_cpu, map_shift_cpu = _compute_lowmem_mask_gpu(img_shape, img_shape_os, trj; sample_mask)
+    # The masked trajectory is gathered and transformed *once* inside the helper and
+    # shared between `calculate_kmask_indcs` and `set_points!`. Returning from the
+    # helper also unroots that temporary before the kernel arrays are allocated.
+    kmask_indcs_os, kmask_indcs_1x, map_1x_cpu, map_shift_cpu, nsamp_t, nfftplan =
+        _lowmem_mask_and_plan(Complex{T}, img_shape, img_shape_os, trj, sample_mask)
+
+    @assert sum(nsamp_t) > 0 "Sample_mask removes all samples, cannot compute kernel."
 
     n1x = length(kmask_indcs_1x)
     Ncoeff = size(U, 2)
@@ -78,7 +84,6 @@ function MRISubspaceRecon.calculate_kernel_lowmem(img_shape, trj::CuArray{T,3}, 
     map_shift_gpu = CuArray(Int32.(map_shift_cpu))
     kmask_indcs_os_gpu = CuArray(kmask_indcs_os)
 
-    nsamp_t = cu(sum(sample_mask, dims=1))
     cumsum_nsamp = CUDA.zeros(eltype(nsamp_t), size(nsamp_t))
     cumsum_nsamp[2:end] = cumsum(nsamp_t[1:end-1])
 
@@ -87,8 +92,6 @@ function MRISubspaceRecon.calculate_kernel_lowmem(img_shape, trj::CuArray{T,3}, 
     S = CuArray{Complex{T}}(undef, sum(nsamp_t))
 
     fftplan  = plan_fft(λ)
-    nfftplan = PlanNUFFT(Complex{T}, img_shape_os; backend=CUDABackend(), gpu_method=:shared_memory, gpu_batch_size=Val(200))
-    set_points!(nfftplan, NonuniformFFTs._transform_point_convention.(trj[:, sample_mask]))
 
     threads_multiply, blocks_multiply, _, _ = launch_config_kernel(nsamp_t, kmask_indcs_os_gpu)
 
@@ -115,14 +118,19 @@ function MRISubspaceRecon.calculate_kernel_lowmem(img_shape, trj::CuArray{T,3}, 
 end
 
 # Real basis U → real kernel (half memory)
-function MRISubspaceRecon.calculate_kernel_lowmem(img_shape, trj::CuArray{T,3}, U::CuArray{T};
+function MRISubspaceRecon.calculate_kernel_lowmem(img_shape, trj::AnyCuArray{T,3}, U::AnyCuArray{T};
     sample_mask=CUDA.ones(Bool, size(trj)[2:end]), verbose=false) where {T <: Real}
 
     img_shape_os = 2 .* img_shape
     D = length(img_shape)
     Nshift = 2^D
 
-    kmask_indcs_os, kmask_indcs_1x, map_1x_cpu, map_shift_cpu = _compute_lowmem_mask_gpu(img_shape, img_shape_os, trj; sample_mask)
+    # See the complex-U method above for why the points are derived in a helper.
+    # `Tplan == T` selects the NUFFT plan specific to real inputs.
+    kmask_indcs_os, kmask_indcs_1x, map_1x_cpu, map_shift_cpu, nsamp_t, nfftplan =
+        _lowmem_mask_and_plan(T, img_shape, img_shape_os, trj, sample_mask)
+
+    @assert sum(nsamp_t) > 0 "Sample_mask removes all samples, cannot compute kernel."
 
     n1x = length(kmask_indcs_1x)
     Ncoeff = size(U, 2)
@@ -134,8 +142,6 @@ function MRISubspaceRecon.calculate_kernel_lowmem(img_shape, trj::CuArray{T,3}, 
     map_shift_gpu = CuArray(Int32.(map_shift_cpu))
     kmask_indcs_os_gpu = CuArray(kmask_indcs_os)
 
-    nsamp_t = cu(sum(sample_mask, dims=1))
-    @assert sum(nsamp_t) > 0 "Sample_mask removes all samples, cannot compute kernel."
     cumsum_nsamp = CUDA.zeros(eltype(nsamp_t), size(nsamp_t))
     cumsum_nsamp[2:end] = cumsum(nsamp_t[1:end-1])
 
@@ -144,8 +150,6 @@ function MRISubspaceRecon.calculate_kernel_lowmem(img_shape, trj::CuArray{T,3}, 
     S = CuArray{T}(undef, sum(nsamp_t))
 
     brfftplan = plan_brfft(λ2, img_shape_os[1])
-    nfftplan = PlanNUFFT(T, img_shape_os; backend=CUDABackend(), gpu_method=:shared_memory, gpu_batch_size=Val(200))
-    set_points!(nfftplan, NonuniformFFTs._transform_point_convention.(trj[:, sample_mask]))
 
     threads_multiply, blocks_multiply, _, _ = launch_config_kernel(nsamp_t, kmask_indcs_os_gpu)
 
@@ -176,9 +180,42 @@ end
 # Mask computation helper
 #############################################################################
 
-function _compute_lowmem_mask_gpu(img_shape, img_shape_os, trj::CuArray{T,3}; sample_mask) where {T}
+"""
+    _lowmem_mask_and_plan(Tplan, img_shape, img_shape_os, trj, sample_mask)
+        -> (kmask_indcs_os, kmask_indcs_1x, map_1x, map_shift, nsamp_t, nfftplan)
+
+Derive everything that depends on `sample_mask` for `calculate_kernel_lowmem`:
+the oversampled/1× k-space masks, the scatter maps, the number of samples per
+time frame, and the NUFFT plan.
+
+The masked trajectory is gathered and converted to the NonuniformFFTs point
+convention only **once** and shared between [`calculate_kmask_indcs`](@ref) and
+`set_points!`. This mirrors `_kmask_and_plan` in `NFFTNormalOp.jl`, and lives in
+its own function for the same reason: the transformed points are a large
+temporary (`D * Nsamples` floats) that stays GC-rooted for as long as its frame
+is alive. Returning from here is what makes it collectable *before* the caller
+allocates `Λ_decomp`, `λ`, `λ2` and `S`.
+"""
+function _lowmem_mask_and_plan(::Type{Tplan}, img_shape, img_shape_os, trj::AnyCuArray{T,3}, sample_mask) where {Tplan, T}
+    sample_idx = _sample_indices(sample_mask)
+    pts = NonuniformFFTs._transform_point_convention.(_gather_points(trj, sample_idx))
+
+    kmask_indcs_os, kmask_indcs_1x, map_1x, map_shift =
+        _compute_lowmem_mask_gpu(img_shape, img_shape_os, trj; sample_mask, points=pts)
+
+    nsamp_t = _nsamples_per_frame(sample_mask, sample_idx) # number of samples per time frame
+
+    nfftplan = PlanNUFFT(Tplan, img_shape_os; backend=CUDABackend(), gpu_method=:shared_memory, gpu_batch_size=Val(200))
+    set_points!(nfftplan, pts) # copies into plan-internal storage
+
+    return kmask_indcs_os, kmask_indcs_1x, map_1x, map_shift, nsamp_t, nfftplan
+end
+
+function _compute_lowmem_mask_gpu(img_shape, img_shape_os, trj::AnyCuArray{T,3}; sample_mask, points=nothing) where {T}
     D = length(img_shape)
-    kmask_indcs_os = Array(calculate_kmask_indcs(img_shape_os, trj; sample_mask))
+    # Reuse the caller's transformed points when available to avoid gathering the
+    # masked trajectory a second time.
+    kmask_indcs_os = Array(calculate_kmask_indcs(img_shape_os, trj; sample_mask, points))
     @assert all(kmask_indcs_os .> 0)
     @assert all(kmask_indcs_os .<= prod(img_shape_os))
 

@@ -175,7 +175,7 @@ function calculate_kernel_lowmem(img_shape, trj::AbstractArray{T,3}, U::Abstract
 end
 
 # Real basis U → real kernel (packed upper triangular, half memory)
-function calculate_kernel_lowmem(img_shape, trj::AbstractArray, U::AbstractArray{T}; sample_mask=trues(size(trj)[2:end]), verbose=false) where {T <: Real}
+function calculate_kernel_lowmem(img_shape, trj::AbstractArray{T,3}, U::AbstractArray{T}; sample_mask=trues(size(trj)[2:end]), verbose=false) where {T <: Real}
     img_shape_os = 2 .* img_shape
     D = length(img_shape)
     Nshift = 2^D

@@ -120,3 +120,33 @@ res_std_nc    = A_std_nc  * b_test
 res_lowmem_nc = A_lowmem_nc * b_test
 
 @test res_lowmem_nc ≈ res_std_nc rtol = 1e-5
+
+## =========================================================================
+## Test 5: Partially sampled `sample_mask` (exercises the gather path)
+## =========================================================================
+sample_mask = trues(2Nx, Ncyc, Nt)
+sample_mask[:, 1:2, 1:3] .= false # remove a few cycles in a few time frames
+sample_mask = reshape(sample_mask, :, Nt)
+@test !all(sample_mask) # make sure we are not silently testing the fully-sampled path
+
+A_std_m    = NFFTNormalOp(img_shape, trj, U; cmaps, sample_mask)
+A_lowmem_m = NFFTNormalOp(img_shape, trj, U; cmaps, sample_mask, lowmem=true)
+
+res_std_m    = A_std_m  * b_test
+res_lowmem_m = A_lowmem_m * b_test
+
+@test res_lowmem_m ≈ res_std_m rtol = 1e-5
+
+# real basis with a mask, too
+A_std_mr    = NFFTNormalOp(img_shape, trj, U_real; cmaps, sample_mask)
+A_lowmem_mr = NFFTNormalOp(img_shape, trj, U_real; cmaps, sample_mask, lowmem=true)
+
+@test A_lowmem_mr * b_test ≈ A_std_mr * b_test rtol = 1e-5
+
+## =========================================================================
+## Test 6: Views and reshapes of the trajectory are accepted
+## =========================================================================
+trj_view = @view trj[:, :, :]
+A_lowmem_v = NFFTNormalOp(img_shape, trj_view, U; cmaps, lowmem=true)
+
+@test A_lowmem_v * b_test ≈ res_lowmem rtol = 1e-5
