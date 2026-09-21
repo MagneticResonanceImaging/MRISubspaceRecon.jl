@@ -12,6 +12,7 @@ using CUDA
 
 include("MaskUtils.jl")
 include("NFFTNormalOp.jl")
+include("NFFTNormalOpLowMem.jl")
 include("BackProjection.jl")
 include("CoilMaps.jl")
 include("FFTNormalOp.jl")

@@ -8,6 +8,10 @@ using Test
     include("data_removal.jl")
 end
 
+@testset "LowMem" begin
+    include("lowmem.jl")
+end
+
 @testset "Recon Cartesian" begin
     include("backprojection_cart.jl")
     include("reconstruct_cart_mask.jl")
@@ -39,6 +43,7 @@ if gpu_available
         include("reconstruct_radial_gpu_real.jl")
         include("reconstruct_cart_trj_gpu.jl")
         include("wrapper_gpu.jl")
+        include("lowmem_gpu.jl")
     end
 else
     @info "Skipping GPU tests: no functional CUDA device."

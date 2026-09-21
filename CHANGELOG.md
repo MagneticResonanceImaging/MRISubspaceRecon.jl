@@ -7,6 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 (pre-1.0: the minor version is bumped for breaking changes, the patch version
 otherwise).
 
+## [Unreleased]
+
+### Added
+
+- **Low-memory Toeplitz normal operator, `lowmem=true`.** `NFFTNormalOp` gained
+  a `lowmem` keyword that selects a decomposed form of the Toeplitz kernel
+  (`NFFTNormalOpLowmem`, `calculate_kernel_lowmem`), available on both CPU and
+  GPU. The `kL1`/`kL2` work buffers are allocated on the **non-oversampled**
+  grid and the kernel is stored as
+  `(Ncoeff*(Ncoeff+1)÷2, n_kmask_1x, 2^D)` — packed upper triangular, indexed by
+  the 1× k-space mask and the `2^D` even/odd sub-grid shifts. The `2^D`
+  oversampling factor is recovered by looping over the shifts with
+  precomputed linear phase ramps instead of materialising the oversampled
+  buffers.
+
+- `test/lowmem.jl` and `test/lowmem_gpu.jl` cross-validate the low-memory
+  operator against the standard one (operator application and 20-iteration CG),
+  for real and complex bases, with and without coil maps, with a partially
+  populated `sample_mask`, and with a trajectory passed as a view.
+  Both are wired into `runtests.jl` (the GPU file behind the existing
+  `CUDA.functional()` guard).
+
+### Changed
+
+- The GPU low-memory kernel calculation now shares the `MaskUtils.jl` fast
+  paths introduced in 0.10.1 for the standard operator, so the two code paths
+  are consistent again:
+
+  - `calculate_kernel_lowmem` and `_compute_lowmem_mask_gpu` accept
+    `AnyCuArray` rather than the concrete `CuArray`, so **views and reshapes**
+    of device arrays work with `lowmem=true`. Previously such a call silently
+    fell through to the CPU method, because the GPU `NFFTNormalOp` entry point
+    already accepted `AnyCuArray`.
+  - `trj[:, sample_mask]` is replaced by `_gather_points`/`_sample_indices`,
+    which takes the `nothing` fast path for a fully-sampled mask and otherwise
+    gathers linear `Int` indices instead of the `CartesianIndex{2}` that GPU
+    logical indexing produces.
+  - The masked trajectory is gathered and converted to NUFFT point convention
+    **once** and shared between `calculate_kmask_indcs` and `set_points!` via
+    the new `_lowmem_mask_and_plan` helper (mirroring `_kmask_and_plan`),
+    instead of twice. As there, doing this in a separate function unroots the
+    temporary before `Λ_decomp`, `λ`, `λ2` and `S` are allocated.
+  - `nsamp_t` now comes from `_nsamples_per_frame`, which returns a vector
+    rather than the `1×Nt` matrix that `sum(sample_mask, dims=1)` produced.
+
+### Fixed
+
+- The complex-basis `calculate_kernel_lowmem` methods were missing the
+  `sum(nsamp_t) > 0` assertion that the real-basis methods had, so a
+  `sample_mask` removing every sample produced a confusing downstream error
+  instead of a clear message.
+- The CPU real-basis `calculate_kernel_lowmem` accepted an unconstrained
+  `trj::AbstractArray`, allowing a 4-D trajectory to bypass the 3-D reshape
+  wrapper. It is now `AbstractArray{T,3}`, matching the complex-basis method.
+
 ## [0.10.1] - unreleased
 
 ### Fixed
