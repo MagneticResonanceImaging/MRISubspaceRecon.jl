@@ -21,7 +21,7 @@ jobs:
           - ubuntu-latest
           - macOS-latest
         arch:
-          - x64
+          - default
     steps:
       - uses: actions/checkout@v7
       - uses: julia-actions/setup-julia@v3
@@ -52,7 +52,7 @@ jobs:
       - uses: julia-actions/setup-julia@v3
         with:
           version: '1'
-          arch: x64
+          arch: default
       - run: |
           julia --project=docs -e '
             using Pkg
