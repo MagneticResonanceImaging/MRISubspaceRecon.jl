@@ -7,3 +7,13 @@ LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 NonuniformFFTs = "cd96f58b-6017-4a02-bb9e-f4d81626177f"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[compat]
+CUDA = "6.5.1"
+FFTW = "1.10.0"
+ImagePhantoms = "0.8.1"
+IterativeSolvers = "0.9.4"
+LinearAlgebra = "<0.0.1, 1"
+NonuniformFFTs = "0.9.10"
+Random = "<0.0.1, 1"
+Test = "<0.0.1, 1"
